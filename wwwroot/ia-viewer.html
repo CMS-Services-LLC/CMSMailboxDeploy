@@ -101,6 +101,18 @@
   <script src="js/InteractiveForm.js" asp-append-version="true"></script>
 
   <script>
+    // Called by the patched SubmitRecord() after every save (in place of CMS's
+    // report-grid refresh). Inside the mailbox, index.html reloads this iframe and
+    // refreshes the message's task status (a first save links a new-record task's
+    // record; Save for Use can finish a task); opened on its own, just reload.
+    function mbxRecordSaved() {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ mbxRecordSaved: true }, window.location.origin);
+      } else {
+        window.location.reload();
+      }
+    }
+
     (function () {
       // Bridge this app's own login token into the name the ported ajax.js expects
       // (sessionStorage is shared with the parent tab/page on this same origin, so
@@ -129,6 +141,17 @@
       fetch("item/" + messageItemId + "/bootstrap", {
         headers: { "Authorization": "Bearer " + realToken }
       }).then(function (r) {
+        if (r.status === 403) {
+          // IaViewerController.Bootstrap: the record exists but hasn't been
+          // released yet, so only the company that created it can open it.
+          return r.json().then(function (res) {
+            if (res && res.reason === "unreleased") {
+              document.getElementById("mbxDeniedBanner").textContent =
+                "This record has not yet been saved for use.";
+            }
+            throw new Error("bootstrap refused: " + (res && res.reason));
+          });
+        }
         if (!r.ok) throw new Error("bootstrap failed");
         return r.json();
       }).then(function (ctx) {
