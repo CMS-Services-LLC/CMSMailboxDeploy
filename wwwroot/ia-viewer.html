@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Secure Record Viewer</title>
+<link rel="stylesheet" href="css/site.css" asp-append-version="true" />
+<style>
+  /* site.css sets body's background to CMS's page-chrome navy (rgb(31,41,67)),
+     meant to peek out around the nav/sidebar this standalone viewer doesn't have.
+     Override to white here only — the shared site.css file itself isn't touched. */
+  html, body { margin: 0; padding: 0; background-color: #fff; }
+  #mbxDeniedBanner { display:none; padding: 24px; font-family: sans-serif; color: #444; }
+  #mbxLoadingBanner { padding: 24px; text-align: center; font-family: sans-serif; color: #444; }
+  /* index.html embeds this page in a FIXED-height iframe with its own scrollbar —
+     but CSS/attributes set from the PARENT page (overflow, scrolling="auto") don't
+     reliably control an embedded document's scrollability in practice. The robust
+     way is to make THIS document's own body the scroll container instead: it fills
+     the iframe's viewport (height:100%) and scrolls internally once content
+     exceeds that. #PageContainer/#ViewDispute must NOT also scroll internally, or
+     content just gets clipped instead of scrolled — ViewDispGO's own inline style
+     on #ViewDispute (height: document.body.clientHeight - 200) is also
+     meaningless here (this page has no other chrome, so clientHeight is ~0 at
+     that point, producing a negative/invalid height) and is overridden below. */
+  html, body { height: 100%; overflow-y: auto; }
+  #PageContainer { height: auto !important; overflow-y: visible !important; }
+  #ViewDispute { height: auto !important; overflow-y: visible !important; }
+  /* site.css's .fileViewer (the attachment/PDF popup) is "position:absolute;
+     top:50px;left:100px" relative to PageContainer's own top edge — fine on a
+     normal CMS page, but PageContainer here can be much taller than the iframe's
+     own viewport (see the body-scroll comment above), so a popup opened after
+     scrolling down to Attachments/Notes renders near the very top of the whole
+     document, off-screen above the current scroll position. Fixed positioning
+     anchors it to the iframe's own viewport instead, wherever the user actually
+     is. Scoped to this page only — not touching the shared site.css class. */
+  .fileViewer { position: fixed !important; }
+  /* Same bug, same fix, for the generic PopUp() modal (js/newOpts.js) used by
+     "Apply Notes" and everything else that calls PopUp() — .PopUp is also
+     "position:absolute" relative to PageContainer's top edge in the shared
+     site.css, so on a long record it opens off-screen above wherever the user
+     had scrolled to, and the page jumps to show it. Fixed positioning anchors it
+     to the iframe's own viewport instead. PopUp()'s own top/left inline styles
+     are unaffected — they just become viewport-relative instead of
+     content-relative, still landing in the same reasonable near-top-left offset. */
+  .PopUp { position: fixed !important; }
+</style>
+</head>
+<body>
+  <!--
+    Hosts CMSNEO's own IA record view/edit UI (InteractiveForm.js's ViewDisp()),
+    copied byte-for-byte into this app's wwwroot (see js/ in this folder) except two
+    small, documented adaptations. This page's only job is to stand up the handful of
+    globals that code expects to already exist (normally set up by CMS's own page
+    shell / GLOBALSTART()), point it at THIS app's own gated backend
+    (IaViewerController), and hand it a MainID/FormID to render.
+
+    Every server call this page's scripts make is independently re-verified against
+    the current recipient's own CMSNEO permissions on every request — see
+    IaViewerController.cs. Loading this page (or its scripts running at all) grants
+    no access by itself.
+  -->
+  <div id="mbxDeniedBanner">You no longer have access to this record, or it could not be loaded.</div>
+  <div id="mbxLoadingBanner"><img src="loading.gif" width="32" height="32" /><div>Please wait while the record is loading...</div></div>
+
+  <!--
+    PageContainer matches CMS's own InteractiveForm.cshtml structure (a single empty
+    shell div — site.css gives #PageContainer height:100%). dispMain/dispReportOuter
+    are NOT static siblings: CMS builds them dynamically INSIDE PageContainer via
+    iaStartMe() (InteractiveForm.js ~line 174), and this bootstrap script below does
+    the same (that function's other side effects — page-chrome nav elements this
+    viewer doesn't have — aren't relevant here, so it isn't called wholesale).
+  -->
+  <div id="PageContainer" style="position:relative;"></div>
+  <div id="loading" style="display:none;"></div>
+  <input type="hidden" id="csrfToken" value="mbx" />
+
+  <!--
+    The rest of these are static page-chrome elements CMS's own _Layout.cshtml and
+    InteractiveForm.cshtml always have present, that global.js's dialog/popup helpers
+    (xconfirm, smconfirm, PopUp, extra, ...) reference as bare globals without ever
+    creating them first — they assume the surrounding page shell already put them
+    there. Found the hard way: xconfirm() threw "confirmWindow is not defined" from
+    Save/View PDF, both of which route through it. Adding the full known set up front
+    instead of chasing these one at a time.
+  -->
+  <div class="confirmWindow" id="confirmWindow" style="z-index:2700; display:none"></div>
+  <div id="confirmWindow2" class="confirmWindow" style="display:none"></div>
+  <div id="extras" style="z-index:2700; display:none"></div>
+  <div class="optWindow" id="optWindow" style="z-index:2500; display:none"></div>
+  <div id="popoutWindow" style="z-index:2500; display:none"></div>
+  <input type="file" id="bulkUploadFile" style="position:absolute; z-index:2500; display:none" />
+  <input type="file" id="bulkUploadAttachments" style="position:absolute; z-index:2500; display:none" multiple />
+
+  <script src="js/jquery.min.js" asp-append-version="true"></script>
+  <script src="js/bootstrap.bundle.min.js" asp-append-version="true"></script>
+  <script src="js/FileViewer.js" asp-append-version="true"></script>
+  <script src="js/ajax.js" asp-append-version="true"></script>
+  <script src="js/Draggable.js" asp-append-version="true"></script>
+  <script src="js/newOpts.js" asp-append-version="true"></script>
+  <script src="js/gchartTables.js" asp-append-version="true"></script>
+  <script src="js/global.js" asp-append-version="true"></script>
+  <script src="js/InteractiveForm.js" asp-append-version="true"></script>
+
+  <script>
+    // Called by the patched SubmitRecord() after every save (in place of CMS's
+    // report-grid refresh). Inside the mailbox, index.html reloads this iframe and
+    // refreshes the message's task status (a first save links a new-record task's
+    // record; Save for Use can finish a task); opened on its own, just reload.
+    // Clicks inside this frame don't reach index.html, so report them: they reset the
+    // mailbox's idle-timeout countdown the same as a click on the page itself.
+    document.addEventListener("click", function () {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ mbxActivity: true }, window.location.origin);
+      }
+    }, true);
+
+    function mbxRecordSaved() {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ mbxRecordSaved: true }, window.location.origin);
+      } else {
+        window.location.reload();
+      }
+    }
+
+    (function () {
+      // Bridge this app's own login token into the name the ported ajax.js expects
+      // (sessionStorage is shared with the parent tab/page on this same origin, so
+      // this does not require re-authenticating — it just aliases the existing key).
+      var realToken = sessionStorage.getItem("mbxToken");
+      if (!realToken) {
+        document.getElementById("mbxLoadingBanner").style.display = "none";
+        document.getElementById("mbxDeniedBanner").style.display = "block";
+        document.getElementById("mbxDeniedBanner").textContent = "You must be logged in to view this record.";
+        return;
+      }
+      sessionStorage.setItem("UserToken", realToken);
+
+      var params = new URLSearchParams(window.location.search);
+      var messageItemId = parseInt(params.get("messageItemId"), 10);
+      if (!messageItemId) {
+        document.getElementById("mbxLoadingBanner").style.display = "none";
+        document.getElementById("mbxDeniedBanner").style.display = "block";
+        return;
+      }
+
+      // Read by the patched newFormData() in js/global.js — every main/adHoc call
+      // this viewer makes gets scoped to this specific shared item server-side.
+      window.MBX_CurrentMessageItemId = messageItemId;
+
+      fetch("item/" + messageItemId + "/bootstrap", {
+        headers: { "Authorization": "Bearer " + realToken }
+      }).then(function (r) {
+        if (r.status === 403) {
+          // IaViewerController.Bootstrap: the record exists but hasn't been
+          // released yet, so only the company that created it can open it.
+          return r.json().then(function (res) {
+            if (res && res.reason === "unreleased") {
+              document.getElementById("mbxDeniedBanner").textContent =
+                "This record has not yet been saved for use.";
+            }
+            throw new Error("bootstrap refused: " + (res && res.reason));
+          });
+        }
+        if (!r.ok) throw new Error("bootstrap failed");
+        return r.json();
+      }).then(function (ctx) {
+        if (!ctx.ok) throw new Error("not ok");
+
+        myCID = ctx.myCID;
+        mgtCID = ctx.mgtCID;
+        isMGT = ctx.isMGT;
+        myUID = ctx.myUID;
+        currentFormID = ctx.formId;
+        ME = { Security: jparse(ctx.security) };
+
+        // Build dispMain/dispReportOuter as CHILDREN of PageContainer — see the HTML
+        // comment above; this is the DOM-structure part of iaStartMe() this viewer
+        // needs, without that function's other page-chrome side effects.
+        PageContainer.innerHTML = "";
+        xsection(PageContainer, [
+            "div|id=dispMain",
+            "div|id=dispReportOuter|||div|id=dispReport"
+        ]);
+        dispReportOuter.style.visibility = "hidden";
+
+        // Stand-in for the report/list-view state ViewDisp()/ViewDispGO normally read
+        // from (populated by the full report grid in CMS, which this standalone
+        // viewer never loads). InteractiveForm.js's ViewDisp() (~line 1986) locates
+        // this row by filtering jsNeo.jsALL on BOTH MainID and FormID, and ViewDispGO
+        // reads several more fields off it (Application_Type, hasDoc, strMainID, its
+        // own echoed FormID, ...) that only exist in NEO_IAGETALLDATA260903's pivoted
+        // report rows, not in NEO_IAGetFormData. This unpivots that report proc's raw
+        // rows the exact same way InteractiveForm.js's own report-loading code does
+        // (~line 674-736: a "ShortNames" row maps column keys — Col-prefixed keys are
+        // aliases — onto a single "Values" row) rather than guessing at the field list.
+        var reportRows = jparse(ctx.reportRaw);
+        var shortNames = reportRows.filter(function (d) { return d.RecordType == "ShortNames"; })[0];
+        var valuesRow = reportRows.filter(function (d) { return d.RecordType == "Values" && d.MainID == ctx.mainId; })[0] ||
+            reportRows.filter(function (d) { return d.RecordType == "Values"; })[0];
+
+        var seed = { MainID: ctx.mainId, FormID: ctx.formId };
+        if (shortNames && valuesRow) {
+            for (var key in shortNames) {
+                if (key.indexOf("Col") !== 0) seed[key] = valuesRow[key];
+            }
+            for (var key in shortNames) {
+                if (key.indexOf("Col") === 0 && shortNames[key] != null) {
+                    seed[shortNames[key]] = valuesRow[key];
+                }
+            }
+        }
+        seed.Viewed = false;
+        seed.UnreadNotes = seed.UnreadNotes || "";
+        seed.UnseenAttachments = seed.UnseenAttachments || "";
+        jsNeo = { jsALL: [seed], jsFiltered: [JSON.parse(JSON.stringify(seed))] };
+        exportJS = [JSON.parse(JSON.stringify(seed))];
+
+        document.getElementById("mbxLoadingBanner").style.display = "none";
+        ViewDisp(ctx.mainId, ctx.formId);
+      }).catch(function (err) {
+        console.log("ia-viewer bootstrap error", err);
+        document.getElementById("mbxLoadingBanner").style.display = "none";
+        document.getElementById("mbxDeniedBanner").style.display = "block";
+      });
+    })();
+  </script>
+</body>
+</html>

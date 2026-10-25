@@ -1,0 +1,1883 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <!-- Never send this page's address to another site: a one-time handoff code
+         (?handoff=, see the startup code at the bottom) can briefly be in it. -->
+    <meta name="referrer" content="no-referrer" />
+    <title>CMS Secure Mailbox</title>
+    <style>
+        /* #appScreen is a fixed 100vh shell with its own internal scroll areas
+           (#inboxList, #messagePane) — without this, the outer body ALSO scrolls
+           whenever its rendered height exceeds the viewport by even a pixel,
+           producing two visible scrollbars instead of one. */
+        html, body { height: 100%; overflow: hidden; }
+        body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: #f4f6f8; color: #222; }
+        #loginScreen { max-width: 360px; margin: 80px auto; background: #fff; padding: 24px; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        #loginScreen input { width: 100%; padding: 8px; margin: 6px 0 14px; box-sizing: border-box; }
+        #loginScreen button { width: 100%; padding: 10px; background: #2c6bd6; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        #forgotLink { display: block; margin-top: 10px; text-align: center; font-size: 13px; color: #2c6bd6; cursor: pointer; text-decoration: underline; background: none; border: none; width: auto; padding: 0; }
+        #forgotHelp { display: none; margin-top: 12px; padding: 12px; background: #f6f8fb; border: 1px solid #dde3ec; border-radius: 4px; font-size: 13px; color: #333; }
+        #forgotHelp p { margin: 0 0 8px; }
+        #forgotHelp ul { margin: 4px 0 8px; padding-left: 18px; }
+        #forgotHelp li { margin-bottom: 4px; }
+        #appScreen { display: none; height: 100vh; }
+        /* The page starts on #startScreen and only then shows the login form or the
+           app (see startup() at the bottom), so a handoff from CMSNEO never flashes
+           the login form while its code is being exchanged. */
+        #loginScreen { display: none; }
+        #startScreen { text-align: center; margin: 120px auto; font-size: 16px; color: #444; }
+        #topBar { background: #1a2c42; color: #fff; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; }
+        #topBarRight { display: flex; align-items: center; gap: 14px; font-size: 13px; }
+        #idleDisplay { color: #c9d6ea; }
+        /* Idle-timeout warning (see the session section of the script). */
+        #idleWarning { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 10000; align-items: center; justify-content: center; }
+        #idleWarning > div { background: #fff; border-radius: 6px; padding: 22px 26px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.3); min-width: 300px; }
+        #layout { display: flex; height: calc(100vh - 44px); }
+        /* #listPane = folder tabs on top + the scrolling message list below. The width/
+           background/border that used to live on #inboxList moved up to the wrapper. */
+        #listPane { width: 320px; display: flex; flex-direction: column; background: #fff; border-right: 1px solid #ddd; min-height: 0; }
+        #folderTabs { display: flex; flex-shrink: 0; border-bottom: 1px solid #ddd; }
+        #folderTabs button { flex: 1; padding: 10px 0; background: #fff; border: none; border-bottom: 3px solid transparent; cursor: pointer; font-size: 14px; color: #555; }
+        #folderTabs button:hover { background: #f0f4fa; }
+        #folderTabs button.active { color: #2c6bd6; border-bottom-color: #2c6bd6; font-weight: bold; }
+        #folderTabs button#refreshBtn { flex: 0 0 auto; padding: 10px 12px; font-size: 16px; color: #2c6bd6; }
+        #folderTabs button#refreshBtn:disabled { color: #aaa; cursor: default; }
+        .listLoading { padding: 18px 14px; color: #777; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+        #inboxList { flex: 1; min-height: 0; overflow-y: auto; }
+        #searchBox { flex-shrink: 0; padding: 8px 10px; border-bottom: 1px solid #ddd; display: flex; gap: 6px; align-items: center; }
+        #searchBox input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+        #searchClear { background: none; border: none; color: #777; cursor: pointer; font-size: 16px; display: none; }
+        .msgRow { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .msgRow:hover { background: #f0f4fa; }
+        .msgRow.unread { font-weight: bold; }
+        /* The message open on the right. Inset so the bordered row keeps its size. */
+        .msgRow.selected { background: #eef4ff; box-shadow: inset 0 0 0 2px #2c6bd6; border-radius: 3px; }
+        .msgRow .subj { display: block; }
+        .msgRow .meta { font-size: 12px; color: #777; font-weight: normal; }
+        .msgRow .clip { margin-right: 4px; font-size: 13px; }
+        #taskFilter { flex-shrink: 0; width: 88px; padding: 5px 2px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; }
+        .taskTag { display: inline-block; font-size: 11px; font-weight: bold; padding: 0 6px; margin-left: 6px; border-radius: 3px; vertical-align: 1px; }
+        .taskTag.Pending { background: #fff4e0; color: #8a5300; }
+        .taskTag.Completed { background: #e6f4ea; color: #1e6b34; }
+        .taskTag.Cancelled { background: #f1f3f4; color: #5f6368; }
+        /* #messagePane is a column: #messageScroll sizes to its own content
+           (subject/from/body/the record) and only shrinks — never grows to fill
+           leftover space — so short content sits naturally above #replyBox with no
+           gap. When content is taller than the available height, #messageScroll
+           shrinks to what's left and scrolls internally instead, keeping #replyBox
+           fully visible below it either way. */
+        #messagePane { flex: 1; display: flex; flex-direction: column; height: 100%; min-width: 0; }
+        #messageScroll { flex: 0 1 auto; min-height: 0; padding: 20px; overflow-y: auto; }
+        #replyBox { flex-shrink: 0; padding: 12px 20px; background: #fff; }
+        /* Attachments (sql/029) */
+        .attachPick { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: #2c6bd6; font-size: 13px; margin-right: 8px; }
+        .attachChips { display: inline; font-size: 12px; color: #444; }
+        .attachChip { display: inline-block; background: #eef2f7; border-radius: 3px; padding: 1px 6px; margin: 2px 4px 2px 0; }
+        .attachChip a { color: #b91c1c; cursor: pointer; margin-left: 4px; text-decoration: none; }
+        /* The conversation (sql/030): one card per message, oldest first */
+        #threadArea { margin: 6px 0 14px; }
+        .threadMsg { border: 1px solid #e3e8f0; border-left: 4px solid #e3e8f0; border-radius: 4px; padding: 8px 12px; margin-bottom: 8px; background: #fff; }
+        .threadMsg.current { border-left-color: #2c6bd6; background: #f7faff; }
+        .threadMsg.mine { background: #fbfcfe; }
+        .threadMsg .tmHead { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+        .threadMsg .tmHead b { color: #1f2937; }
+        .threadMsg .tmBody { white-space: normal; }
+        #threadArea .attFile { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dde3ec; border-radius: 4px; padding: 4px 8px; margin: 0 6px 6px 0; font-size: 13px; cursor: pointer; color: #1f2937; background: #fbfcfe; }
+        #threadArea .attFile:hover { background: #eef4ff; }
+        #composeTo { border: 1px solid #ccc; border-radius: 4px; max-height: 180px; overflow-y: auto; padding: 4px 6px; }
+        #composeTo label { display: block; font-size: 13px; padding: 2px 0; cursor: pointer; }
+        .itemCard { border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin: 8px 0; background: #fff; }
+        /* Dynamic Report viewer (drView*) — see loadDRReport()/openDRRow(). */
+        .drTableWrap { max-height: 300px; overflow: auto; border: 1px solid #ddd; margin-top: 8px; }
+        .drTable { border-collapse: collapse; font-size: 12px; width: 100%; }
+        .drTable th { position: sticky; top: 0; background: #f0f4fa; text-align: left; padding: 4px 6px; border-bottom: 1px solid #ccc; white-space: nowrap; }
+        .drTable td { padding: 4px 6px; border-bottom: 1px solid #eee; white-space: nowrap; }
+        .drTable tr.drRow { cursor: pointer; }
+        .drTable tr.drRow:hover { background: #eef4ff; }
+        .drTable tr.drRow.selected { background: #dce8ff; }
+        .drPanel { border: 1px solid #ccd; border-radius: 4px; padding: 10px; margin-top: 8px; background: #fafbff; }
+        .drPanel h4 { margin: 12px 0 6px 0; }
+        .drFields td { padding: 3px 6px; font-size: 13px; vertical-align: top; }
+        .drFields input { width: 100%; box-sizing: border-box; }
+        .drList { font-size: 12px; border-collapse: collapse; width: 100%; }
+        .drList td { padding: 3px 6px; border-bottom: 1px solid #eee; }
+        .linkBtn { background: none; border: none; color: #2c6bd6; cursor: pointer; padding: 0; font-size: 12px; }
+        .itemCard button { padding: 6px 12px; }
+        table.fieldTable { border-collapse: collapse; width: 100%; margin-top: 8px; }
+        table.fieldTable td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; }
+        table.fieldTable td.k { font-weight: bold; width: 220px; background: #fafafa; }
+        #replyBox { border-top: 1px solid #ddd; }
+        #replyBox textarea, #replyBox input { width: 100%; box-sizing: border-box; padding: 6px; margin: 4px 0; }
+        .err { color: #c0392b; margin: 8px 0; }
+        .hint { color: #777; font-size: 13px; }
+        button.primary { background: #2c6bd6; color: #fff; border: none; border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+        button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        button.secondary { background: #eee; border: 1px solid #ccc; border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+        /* ia-viewer.html's ported PopUp() (js/newOpts.js) builds modals as plain divs
+           inside its own iframe document — a browser scopes that content to the
+           iframe's own small embedded box no matter what CSS the popup itself uses.
+           Rather than reparenting popup DOM into this page (which would break every
+           bare `document.getElementById` call the ported code makes internally),
+           the iframe posts us a message when a popup opens/closes and we grow the
+           IFRAME ELEMENT ITSELF to fill the viewport instead — see the message
+           listener below. */
+        /* top starts at 50px, not 0 — InteractiveForm.js's own "Additional Actions"/
+           Save button row (#dispButtons, float:right near the top of the record) would
+           otherwise render directly under our fixed Exit Fullscreen button once the
+           iframe covers the whole viewport. Reserving this strip keeps the iframe's
+           own content entirely below our controls instead of guessing at exact
+           overlap pixels. */
+        .mbx-iframe-fullscreen { position: fixed !important; top: 50px !important; left: 0 !important; width: 100vw !important; height: calc(100vh - 50px) !important; z-index: 99999; margin: 0 !important; border: none !important; background: #fff; }
+        /* Sits above the fullscreened iframe (z-index 99999) as a manual escape hatch —
+           the iframe's own PopUp() close button is the normal way out, but this covers
+           any close path inside that ported code that doesn't route through
+           mbxNotifyPopupState (e.g. navigating away within the iframe without closing
+           the modal first). */
+        /* #c0392b (matches .err elsewhere in this app) instead of #topBar's own navy —
+           the button previously used the exact same navy/white as #topBar behind it
+           and was nearly invisible sitting on top of it. */
+        #mbxExitFullscreenBtn { display: none; position: fixed; top: 12px; right: 12px; z-index: 100000; background: #c0392b; color: #fff; border: none; border-radius: 4px; padding: 8px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4); font-weight: bold; }
+        /* While any iframe is fullscreen, the reserved 50px top strip (see
+           .mbx-iframe-fullscreen) is the only part of the underlying page still
+           showing — if an itemCard's header happens to render within that strip
+           (e.g. a short message body puts the card near the very top), its own
+           "View Fullscreen" button visibly peeks out next to Exit Fullscreen.
+           Hiding all item headers while fullscreen is simpler and more robust than
+           trying to compute whether a given card's header falls in that strip. */
+        body.mbx-fullscreen-active .mbx-item-header { visibility: hidden; }
+        /* #topBar is a normal-flow element at the very top of the page — its own
+           "Log Out" button (justify-content:space-between pushes it to the right
+           edge) sits almost exactly where our fixed Exit Fullscreen button does,
+           so it visibly peeked out from behind it. #topBar isn't useful while
+           viewing a record fullscreen anyway, so hide it outright rather than
+           trying to carve out just the Log Out button. */
+        body.mbx-fullscreen-active #topBar { visibility: hidden; }
+    </style>
+</head>
+<body>
+
+    <div id="startScreen">
+        <img src="loading.gif" width="32" height="32" alt="" /><br /><br />
+        Mailbox loading. Please wait ...
+    </div>
+
+    <div id="idleWarning">
+        <div>
+            <div style="font-weight:bold;font-size:16px;margin-bottom:8px">Session Timeout</div>
+            <div id="idleWarningText"></div><br />
+            <button class="primary" onclick="stayLoggedIn()">Stay logged in</button>
+        </div>
+    </div>
+
+    <div id="loginScreen">
+        <h2>CMS Secure Mailbox</h2>
+        <div id="loginStep">
+            <input id="username" placeholder="Username" autocomplete="username" onkeyup="if (event.key === 'Enter') doLogin()" />
+            <input id="password" type="password" placeholder="Password" autocomplete="current-password" onkeyup="if (event.key === 'Enter') doLogin()" />
+            <button onclick="doLogin()">Log In</button>
+            <button id="forgotLink" type="button" onclick="toggleForgotHelp()">Forgot password?</button>
+            <!-- CMS has no self-service reset: the mailbox uses the CMS login itself, so this
+                 points people at it, at their browser's saved passwords, and at their admin. -->
+            <div id="forgotHelp">
+                <p><b>Use your CMS username and password.</b> The Secure Mailbox signs you in with the same account you use for CMS; there is no separate mailbox password.</p>
+                <p>If your browser saved your CMS password, you can look it up (search for <b>cms-services</b>; your computer may ask for its own password first):</p>
+                <ul>
+                    <li><b>Chrome:</b> menu &#8942; &rarr; Passwords and autofill &rarr; Google Password Manager</li>
+                    <li><b>Edge:</b> menu &middot;&middot;&middot; &rarr; Settings &rarr; Passwords</li>
+                    <li><b>Firefox:</b> menu &#9776; &rarr; Passwords</li>
+                    <li><b>A password manager app</b> (1Password, LastPass, Bitwarden, ...): search it for cms-services</li>
+                </ul>
+                <p><b>Already signed in to CMS?</b> You can open the Secure Mailbox from there without signing in again: open <b>Mailbox</b> in CMS's left menu and click <b>Secure Mailbox</b> at the bottom of the folder list.</p>
+                <p>Still can't find it? Ask your company's CMS administrator to reset your password, or contact CMS Services at <a href="mailto:info@cms-services.net">info@cms-services.net</a>.</p>
+            </div>
+        </div>
+        <div id="loginLoadingBanner" style="display:none;text-align:center;padding:12px"><img src="loading.gif" width="32" height="32" /></div>
+        <div id="mfaStep" style="display:none">
+            <p class="hint" id="mfaHint">Enter your authenticator code, or one of your backup codes.</p>
+            <img id="mfaBarcode" style="display:none;max-width:100%" />
+            <input id="passcode" placeholder="6-digit code or backup code" autocomplete="one-time-code" onkeyup="if (event.key === 'Enter') doVerify2fa()" />
+            <button onclick="doVerify2fa()">Verify</button>
+        </div>
+        <div class="err" id="loginError"></div>
+    </div>
+
+    <div id="appScreen">
+        <div id="topBar">
+            <strong>CMS Secure Mailbox</strong>
+            <div id="topBarRight">
+                <span id="loggedInAs"></span>
+                <span id="idleDisplay"></span>
+                <button class="secondary" onclick="logout()">Log Out</button>
+            </div>
+        </div>
+        <div id="layout">
+            <div id="listPane">
+                <div id="folderTabs">
+                    <button id="tab_inbox" class="active" onclick="setFolder('inbox')">Inbox</button>
+                    <button id="tab_sent" onclick="setFolder('sent')">Sent</button>
+                    <button id="tab_archived" onclick="setFolder('archived')">Archived</button>
+                    <button id="newMsgBtn" title="New message" style="flex:0 0 auto;padding:10px 12px;color:#2c6bd6" onclick="openCompose()">&#9993; New</button>
+                    <button id="refreshBtn" title="Refresh messages" onclick="refreshMailbox()">&#8635;</button>
+                </div>
+                <div id="searchBox">
+                    <input id="searchInput" type="search" placeholder="Search subject, task, sender..." oninput="renderList()" />
+                    <button id="searchClear" title="Clear search" onclick="clearSearch()">&times;</button>
+                    <select id="taskFilter" title="Filter by task status" onchange="renderList()">
+                        <option value="">All</option>
+                        <option value="Pending">Pending</option>
+                        <option value="Completed">Completed</option>
+                    </select>
+                </div>
+                <div id="inboxList"></div>
+            </div>
+            <div id="messagePane"><p class="hint" style="padding:10px">Select a message.</p></div>
+        </div>
+    </div>
+
+    <button id="mbxExitFullscreenBtn" onclick="mbxExitFullscreen()">Exit Fullscreen</button>
+
+    <script>
+        var apiBase = "";
+        var token = sessionStorage.getItem("mbxToken") || "";
+        var pendingToken = "";
+        var currentMessageId = null;
+        var currentFolder = "inbox";   // "inbox" | "sent" | "archived"
+        var currentArchived = false;   // whether the open message is archived (recipient's own flag)
+        var EMPTY_PANE_HTML = "<p class=\"hint\" style=\"padding:10px\">Select a message.</p>";
+
+        function api(path, opts) {
+            opts = opts || {};
+            opts.headers = opts.headers || {};
+            if (token) opts.headers["Authorization"] = "Bearer " + token;
+            return fetch(apiBase + path, opts);
+        }
+
+        function doLogin() {
+            var u = document.getElementById("username").value;
+            var p = document.getElementById("password").value;
+            document.getElementById("loginError").innerText = "";
+            document.getElementById("loginLoadingBanner").style.display = "block";
+            fetch(apiBase + "/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ Username: u, Password: p })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    document.getElementById("loginLoadingBanner").style.display = "none";
+                    // Local testing with 2FA switched off (AuthController, Development only).
+                    if (res.status === "ok" && res.token) {
+                        token = res.token;
+                        sessionStorage.setItem("mbxToken", token);
+                        showApp();
+                        return;
+                    }
+                    if (res.status === "mfa_required") {
+                        pendingToken = res.pendingToken;
+                        document.getElementById("passcode").value = "";
+                        document.getElementById("loginStep").style.display = "none";
+                        document.getElementById("mfaStep").style.display = "block";
+                        if (res.barcodeUrl) {
+                            document.getElementById("mfaBarcode").src = res.barcodeUrl;
+                            document.getElementById("mfaBarcode").style.display = "block";
+                            document.getElementById("mfaHint").innerText = "Scan this QR code in your authenticator app, then enter the code it shows.";
+                        }
+                    } else if (res.status === "bad_login") {
+                        document.getElementById("loginError").innerText = "Incorrect username or password.";
+                    } else if (res.status === "bad_ip") {
+                        document.getElementById("loginError").innerText = "New location detected — check your email to validate this IP address, then try again.";
+                    } else {
+                        document.getElementById("loginError").innerText = "Login failed.";
+                    }
+                })
+                .catch(function () {
+                    document.getElementById("loginLoadingBanner").style.display = "none";
+                    document.getElementById("loginError").innerText = "Could not reach the server.";
+                });
+        }
+
+        function doVerify2fa() {
+            var code = document.getElementById("passcode").value;
+            document.getElementById("loginError").innerText = "";
+            fetch(apiBase + "/auth/verify2fa", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ PendingToken: pendingToken, Passcode: code })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res.status === "ok") {
+                        token = res.token;
+                        sessionStorage.setItem("mbxToken", token);
+                        showApp();
+                    } else if (res.status === "invalid_passcode") {
+                        document.getElementById("loginError").innerText = "Incorrect code — try again.";
+                    } else {
+                        document.getElementById("loginError").innerText = "Session expired — log in again.";
+                        document.getElementById("mfaStep").style.display = "none";
+                        document.getElementById("loginStep").style.display = "block";
+                    }
+                })
+                .catch(function () { document.getElementById("loginError").innerText = "Could not reach the server."; });
+        }
+
+        function logout() {
+            stopSession();
+            sessionStorage.removeItem("mbxToken");
+            sessionStorage.removeItem("UserToken");
+            token = "";
+            document.getElementById("appScreen").style.display = "none";
+            document.getElementById("startScreen").style.display = "none";
+            document.getElementById("loginScreen").style.display = "block";
+            document.getElementById("mfaStep").style.display = "none";
+            document.getElementById("loginStep").style.display = "block";
+            document.getElementById("passcode").value = "";
+            // Don't leave this user's list or open message in the page for whoever logs in next.
+            folderRows = [];
+            currentMessageId = null;
+            document.getElementById("inboxList").innerHTML = "";
+            document.getElementById("messagePane").innerHTML = EMPTY_PANE_HTML;
+        }
+
+        // Switching folders always clears the open message — it may not belong to the
+        // folder being switched to (an archived message isn't in Inbox, etc.).
+        function setFolder(folder) {
+            currentFolder = folder;
+            currentMessageId = null;
+            ["inbox", "sent", "archived"].forEach(function (f) {
+                document.getElementById("tab_" + f).classList.toggle("active", f === folder);
+            });
+            document.getElementById("messagePane").innerHTML = EMPTY_PANE_HTML;
+            // Don't leave the previous folder's rows on screen under the new tab while
+            // the new list is still loading.
+            loadInbox(true);
+        }
+
+        // ---- Session: idle timeout + heartbeat (same idea as CMSNEO's layout.js /
+        // global.js heartbeat, with fixed times) ---------------------------------
+        // Any click — on this page or inside a record viewer (it posts mbxActivity) —
+        // resets the countdown to IDLE_MINUTES. When it runs out, a warning counts down
+        // WARN_SECONDS; "Stay logged in" resets it, reaching 0 logs out. Separately,
+        // the heartbeat swaps in a fresh login token every minute (auth/heartbeat) so
+        // an open session's 60-minute token never expires under it.
+        var IDLE_MINUTES = 30;
+        var WARN_SECONDS = 30;
+        var HEARTBEAT_MS = 60000;
+
+        var idleDeadline = 0, idleTick = null, heartbeatTimer = null, heartbeatFails = 0;
+        var warningLeft = 0;
+
+        function startSession() {
+            stopSession();
+            resetIdle();
+            idleTick = setInterval(idleCheck, 1000);
+            heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+            api("/auth/me")
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (me) {
+                    if (!me || !me.name) return;
+                    document.getElementById("loggedInAs").innerText =
+                        "Logged in as: " + me.name + (me.company ? " (" + me.company + ")" : "");
+                })
+                .catch(function () { });
+        }
+
+        function stopSession() {
+            if (idleTick) clearInterval(idleTick);
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            idleTick = heartbeatTimer = null;
+            document.getElementById("idleWarning").style.display = "none";
+            document.getElementById("idleDisplay").innerText = "";
+            document.getElementById("loggedInAs").innerText = "";
+        }
+
+        function resetIdle() {
+            // Clicks while the warning is up don't count — only "Stay logged in" does.
+            if (document.getElementById("idleWarning").style.display === "flex") return;
+            idleDeadline = Date.now() + IDLE_MINUTES * 60000;
+            idleCheck();
+        }
+
+        function stayLoggedIn() {
+            document.getElementById("idleWarning").style.display = "none";
+            resetIdle();
+        }
+
+        function idleCheck() {
+            if (!token) return;
+            var left = idleDeadline - Date.now();
+            if (left > 0) {
+                var mins = Math.ceil(left / 60000);
+                document.getElementById("idleDisplay").innerText = mins + " minute" + (mins === 1 ? "" : "s") + " until timeout";
+                return;
+            }
+            // Deadline passed: show the warning and count WARN_SECONDS down from when it
+            // passed (so a computer that slept through it doesn't get the full 30s).
+            var overdue = Math.floor(-left / 1000);
+            warningLeft = WARN_SECONDS - overdue;
+            if (warningLeft <= 0) {
+                logout();
+                return;
+            }
+            document.getElementById("idleDisplay").innerText = "";
+            document.getElementById("idleWarningText").innerText = "You will be logged out in " + warningLeft + " seconds.";
+            document.getElementById("idleWarning").style.display = "flex";
+        }
+
+        function heartbeat() {
+            if (!token) return;
+            api("/auth/heartbeat", { method: "POST" })
+                .then(function (r) {
+                    if (r.status === 401) throw new Error("unauthorized");
+                    if (!r.ok) throw new Error("failed");
+                    return r.json();
+                })
+                .then(function (res) {
+                    heartbeatFails = 0;
+                    token = res.token;
+                    sessionStorage.setItem("mbxToken", token);
+                    // The record viewer frames' ajax.js reads this key on every request
+                    // (sessionStorage is shared with same-origin frames in this tab).
+                    sessionStorage.setItem("UserToken", token);
+                })
+                .catch(function (ex) {
+                    // A blip isn't a dead session — log out only after 3 failures in a row.
+                    heartbeatFails++;
+                    if (heartbeatFails >= 3) logout();
+                });
+        }
+
+        document.addEventListener("click", function () { if (token) resetIdle(); }, true);
+
+        function showLogin() {
+            document.getElementById("startScreen").style.display = "none";
+            document.getElementById("loginScreen").style.display = "block";
+        }
+
+        function showApp() {
+            document.getElementById("startScreen").style.display = "none";
+            document.getElementById("loginScreen").style.display = "none";
+            document.getElementById("appScreen").style.display = "block";
+            startSession();
+
+            // Deep link from the share-notification email (?message=<id>) — open it
+            // once, then strip the query string so a page refresh doesn't re-trigger it.
+            var params = new URLSearchParams(window.location.search);
+            var deepLinkMessageId = params.get("message");
+            if (deepLinkMessageId) window.history.replaceState({}, "", window.location.pathname);
+
+            // Refresh this user's access cache (NEO_ResetUserCreds, as CMS does on every page load)
+            // before listing or opening anything; the access checks read from it. A failed refresh
+            // still loads the page.
+            api("/auth/refresh-access", { method: "POST" })
+                .catch(function () { })
+                .then(function () {
+                    setFolder("inbox");
+                    if (deepLinkMessageId) openMessage(parseInt(deepLinkMessageId));
+                });
+        }
+
+        // Loads whichever folder is current. `folder` is captured up front so a slow
+        // response for a folder the user has already clicked away from can't paint over
+        // the list for the one they're now looking at.
+        // The current folder's messages as last loaded; renderList() draws them,
+        // filtered by the search box. Search is client-side over what the folder
+        // already returned (subject, sender, company, recipients, and the names of the
+        // message's items and tasks, sql/022) — no extra request.
+        // The task filter uses each message's TaskState (sql/022): Pending while any of
+        // its tasks isn't Completed, Completed once all are; messages without tasks
+        // show only under All.
+        var folderRows = [];
+
+        // ---- Sharing a task you were assigned (sql/028, TaskController) ---------------
+        // Colleagues in your own company who hold the task's permission: Manage = work on it
+        // as you can, Read only = follow it. Changes are held here until Save, which applies
+        // them one at a time; Cancel discards them. The server checks you're the assignee.
+        var taskShare = null;   // { taskId, orig: {uid: access}, cur: {uid: access}, names: {uid: name}, candidates: [uid] }
+
+        function openTaskShare(taskId) {
+            closeTaskShare();
+            var ov = document.createElement("div");
+            ov.id = "taskShareOverlay";
+            ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10000;display:flex;align-items:center;justify-content:center";
+            ov.innerHTML = "<div style='background:#fff;border-radius:6px;width:780px;max-width:94%;min-height:420px;max-height:85vh;display:flex;flex-direction:column;padding:18px 22px;box-shadow:0 4px 16px rgba(0,0,0,0.3);font-size:14px'>" +
+                "<b style='margin-bottom:6px'>Share this task</b>" +
+                "<p class='hint'>Give colleagues in your company access to this task. <b>Manage</b>: work on it as you can (fill in the form, upload the report, answer the exam). <b>Read only</b>: open it and follow its status. Only people with this task's permission are listed.</p>" +
+                "<div style='flex:1;overflow-y:auto'><div id='taskShareList'><p class='hint'>Loading...</p></div>" +
+                "<div id='taskShareAdd' style='display:flex;gap:6px;align-items:center;margin-top:10px'></div></div>" +
+                "<div class='err' id='taskShareErr'></div>" +
+                "<div style='display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #e0e8f2;padding-top:10px;margin-top:10px'>" +
+                "<button class='secondary' style='width:auto' onclick='closeTaskShare()'>Cancel</button>" +
+                "<button class='primary' style='width:auto' id='taskShareSaveBtn' onclick='saveTaskShares()'>Save</button></div></div>";
+            document.body.appendChild(ov);
+
+            taskShare = { taskId: taskId, orig: {}, cur: {}, names: {}, candidates: [] };
+            api("/task/" + taskId + "/shares")
+                .then(function (r) { if (r.status === 401) { logout(); throw new Error("unauthorized"); } if (!r.ok) throw new Error("refused"); return r.json(); })
+                .then(function (res) {
+                    if (!taskShare || taskShare.taskId !== taskId) return;
+                    res.shares.forEach(function (sh) {
+                        taskShare.orig[sh.UID] = sh.Access;
+                        taskShare.cur[sh.UID] = sh.Access;
+                        taskShare.names[sh.UID] = sh.Name;
+                    });
+                    res.candidates.forEach(function (c) { taskShare.names[c.UID] = c.Name; });
+                    taskShare.candidates = res.candidates.map(function (c) { return c.UID; });
+                    renderTaskShares();
+                })
+                .catch(function () {
+                    var list = document.getElementById("taskShareList");
+                    if (list) list.innerHTML = "<p class='err'>Sharing isn't available for this task.</p>";
+                });
+        }
+
+        function closeTaskShare(refresh) {
+            var ov = document.getElementById("taskShareOverlay");
+            if (ov) ov.parentNode.removeChild(ov);
+            taskShare = null;
+            if (refresh && currentMessageId) refreshTaskCards();
+        }
+
+        function accessSelect(value) {
+            return "<select>" +
+                "<option value='manage'" + (value === "manage" ? " selected" : "") + ">Manage</option>" +
+                "<option value='read'" + (value !== "manage" ? " selected" : "") + ">Read only</option></select>";
+        }
+
+        // Draws the window from taskShare.cur (who will have access once saved).
+        function renderTaskShares() {
+            var st = taskShare;
+            var list = document.getElementById("taskShareList");
+            var add = document.getElementById("taskShareAdd");
+            if (!st || !list) return;
+            var uids = Object.keys(st.cur);
+            var removed = Object.keys(st.orig).filter(function (uid) { return !(uid in st.cur); });
+            list.innerHTML = (uids.length ? "" : "<p class='hint'>Not shared with anyone.</p>") +
+                (removed.length ? "<p class='hint' style='color:#b91c1c'>" + escapeHtml(removed.map(function (uid) { return st.names[uid]; }).join(", ")) + " will lose access when you click Save.</p>" : "");
+            uids.forEach(function (uid) {
+                var row = document.createElement("div");
+                row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee";
+                row.innerHTML = "<span style='flex:1'>" + escapeHtml(st.names[uid]) + (st.orig[uid] ? "" : " <span class='hint'>(new)</span>") + "</span>" +
+                    accessSelect(st.cur[uid]) +
+                    " <button title='Takes away this person&#39;s access when you click Save' style='width:auto;background:#fff;color:#b91c1c;border:1px solid #e3a3a3;border-radius:3px;padding:3px 10px;cursor:pointer'>Remove access</button>";
+                row.querySelector("select").onchange = function () { st.cur[uid] = this.value; };
+                row.querySelector("button").onclick = function () { delete st.cur[uid]; renderTaskShares(); };
+                list.appendChild(row);
+            });
+
+            // Anyone who could be added: current candidates plus anyone removed in this session.
+            var addable = st.candidates.concat(Object.keys(st.orig).map(Number)).filter(function (uid, ix, a) {
+                return a.indexOf(uid) === ix && !(uid in st.cur);
+            });
+            if (!addable.length) {
+                add.innerHTML = "<p class='hint'>No one else in your company has this task's permission.</p>";
+                return;
+            }
+            add.innerHTML = "<select id='taskShareWho' style='flex:1'><option value=''>-- Add a colleague --</option>" +
+                addable.map(function (uid) { return "<option value='" + uid + "'>" + escapeHtml(st.names[uid]) + "</option>"; }).join("") +
+                "</select>" + accessSelect("read").replace("<select>", "<select id='taskShareAccess'>") +
+                "<button class='secondary' style='width:auto' id='taskShareAddBtn'>Add</button>";
+            document.getElementById("taskShareAddBtn").onclick = function () {
+                var who = document.getElementById("taskShareWho").value;
+                if (!who) { document.getElementById("taskShareErr").innerText = "Choose a colleague."; return; }
+                document.getElementById("taskShareErr").innerText = "";
+                st.cur[who] = document.getElementById("taskShareAccess").value;
+                renderTaskShares();
+            };
+        }
+
+        // Applies the differences between orig and cur, one request at a time, then closes.
+        function saveTaskShares() {
+            var st = taskShare;
+            if (!st) return;
+            var changes = [];
+            Object.keys(st.cur).forEach(function (uid) { if (st.orig[uid] !== st.cur[uid]) changes.push([uid, st.cur[uid]]); });
+            Object.keys(st.orig).forEach(function (uid) { if (!(uid in st.cur)) changes.push([uid, "none"]); });
+            if (!changes.length) { closeTaskShare(); return; }
+
+            var btn = document.getElementById("taskShareSaveBtn");
+            btn.disabled = true;
+            document.getElementById("taskShareErr").innerText = "";
+            var chain = Promise.resolve();
+            changes.forEach(function (c) {
+                chain = chain.then(function () {
+                    return api("/task/" + st.taskId + "/share", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ShareUid: parseInt(c[0], 10), Access: c[1] })
+                    })
+                        .then(function (r) { if (!r.ok) throw new Error(st.names[c[0]] + ": refused"); return r.json(); })
+                        .then(function (res) {
+                            if (res.status !== "ok") throw new Error(st.names[c[0]] + ": " + (res.status === "not_allowed"
+                                ? "they must be in your company and have this task's permission" : res.status));
+                        });
+                });
+            });
+            chain
+                .then(function () { closeTaskShare(true); })
+                .catch(function (ex) {
+                    btn.disabled = false;
+                    document.getElementById("taskShareErr").innerText = "Not everything was saved. " + ex.message;
+                });
+        }
+
+        // ---- Attachments and new messages (Phase 6, sql/029, ComposeController) --------
+        // Files are picked here, the message (or reply) is sent, then each file is uploaded to
+        // it, one per request. Limits are checked here for a quick answer and again server-side.
+        var ATTACH_MAX_BYTES = 25 * 1024 * 1024, ATTACH_MAX_COUNT = 10;
+        var ATTACH_TYPES = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".png", ".jpg", ".jpeg", ".gif", ".txt", ".csv", ".zip"];
+        var pickedFiles = { reply: [], compose: [] };
+
+        function addPickedFiles(input, which) {
+            var errs = [];
+            Array.prototype.forEach.call(input.files, function (f) {
+                var ext = (f.name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
+                if (ATTACH_TYPES.indexOf(ext) === -1) errs.push(f.name + ": that file type isn't allowed");
+                else if (f.size > ATTACH_MAX_BYTES) errs.push(f.name + ": larger than 25 MB");
+                else if (f.size === 0) errs.push(f.name + ": empty file");
+                else if (pickedFiles[which].length >= ATTACH_MAX_COUNT) errs.push(f.name + ": at most " + ATTACH_MAX_COUNT + " files");
+                else pickedFiles[which].push(f);
+            });
+            input.value = "";
+            renderPickedFiles(which);
+            var err = document.getElementById(which === "reply" ? "replyError" : "composeError");
+            if (err) err.innerText = errs.join("; ");
+        }
+
+        function renderPickedFiles(which) {
+            var el = document.getElementById(which === "reply" ? "replyFiles" : "composeFiles");
+            if (!el) return;
+            el.innerHTML = "";
+            pickedFiles[which].forEach(function (f, ix) {
+                var chip = document.createElement("span");
+                chip.className = "attachChip";
+                chip.textContent = f.name + " (" + fileSizeText(f.size) + ")";
+                var x = document.createElement("a");
+                x.innerHTML = "&times;";
+                x.title = "Remove";
+                x.onclick = function () { pickedFiles[which].splice(ix, 1); renderPickedFiles(which); };
+                chip.appendChild(x);
+                el.appendChild(chip);
+            });
+        }
+
+        function fileSizeText(n) {
+            return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+        }
+
+        var ATTACH_ERRORS = {
+            not_allowed: "attachments can only be added right after sending",
+            too_many: "a message can have at most 10 attachments",
+            too_large: "larger than 25 MB",
+            type_not_allowed: "that file type isn't allowed",
+            empty_file: "empty file"
+        };
+
+        // Uploads files to a message the caller just sent, one at a time. Resolves with a list
+        // of "name: reason" for the ones that failed.
+        function uploadAttachments(messageId, files) {
+            var failed = [];
+            var chain = Promise.resolve();
+            files.forEach(function (f) {
+                chain = chain.then(function () {
+                    var fd = new FormData();
+                    fd.append("file", f, f.name);
+                    return api("/inbox/" + messageId + "/attachments", { method: "POST", body: fd })
+                        .then(function (r) { return r.ok ? r.json() : { status: "error" }; })
+                        .then(function (res) { if (res.status !== "ok") failed.push(f.name + ": " + (ATTACH_ERRORS[res.status] || res.status)); })
+                        .catch(function () { failed.push(f.name + ": upload failed"); });
+                });
+            });
+            return chain.then(function () { return failed; });
+        }
+
+        // One message of the conversation: who, to whom, when, the text, and its attachments.
+        function threadCardHtml(m, atts, isCurrent) {
+            var html = "<div class='threadMsg" + (isCurrent ? " current" : "") + (m.FromMe ? " mine" : "") + "' data-thread-id='" + m.MessageID + "'>" +
+                "<div class='tmHead'><b>" + escapeHtml(m.FromMe ? "You" : m.FromName) + "</b>" +
+                (m.FromMe ? "" : " (" + escapeHtml(m.FromCompany || "") + ")") +
+                " &rarr; " + escapeHtml(m.ToNames || "") + " &middot; " + new Date(m.DTCreated).toLocaleString() +
+                (isCurrent ? " &middot; <i>this message</i>" : "") + "</div>" +
+                "<div class='tmBody'>" + (escapeHtml(m.Body || "").replace(/\n/g, "<br/>") || "<span class='hint'>(no text)</span>") + "</div>";
+            if (atts.length) {
+                html += "<div style='margin-top:6px'>" + atts.map(function (a) {
+                    return "<span class='attFile' title='Download' onclick='downloadAttachment(" + a.AttachmentID + ", " +
+                        escapeHtml(JSON.stringify(a.FileName)) + ")'>&#128206; " + escapeHtml(a.FileName) + " (" + fileSizeText(a.SizeBytes) + ")</span>";
+                }).join("") + "</div>";
+            }
+            return html + "</div>";
+        }
+
+        function loadThread(messageId) {
+            api("/inbox/" + messageId + "/thread")
+                .then(function (r) { if (!r.ok) throw new Error("no thread"); return r.json(); })
+                .then(function (res) {
+                    if (messageId !== currentMessageId) return;
+                    var area = document.getElementById("threadArea");
+                    if (!area) return;
+                    var msgs = JSON.parse(res.messages), atts = JSON.parse(res.attachments);
+                    area.innerHTML = (msgs.length > 1 ? "<div class='hint' style='margin-bottom:6px'>Conversation &middot; " + msgs.length + " messages</div>" : "") +
+                        msgs.map(function (m) {
+                            return threadCardHtml(m, atts.filter(function (a) { return a.MessageID === m.MessageID; }), m.MessageID === messageId);
+                        }).join("");
+                    var cur = area.querySelector(".threadMsg.current");
+                    if (cur && msgs.length > 1) cur.scrollIntoView({ block: "nearest" });
+                })
+                .catch(function () { /* the opened message alone stays shown */ });
+        }
+
+        function downloadAttachment(id, name) {
+            api("/attachment/" + id)
+                .then(function (r) { if (r.status === 401) { logout(); throw new Error("unauthorized"); } if (!r.ok) throw new Error("not found"); return r.blob(); })
+                .then(function (blob) {
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement("a");
+                    a.href = url;
+                    a.download = name;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+                })
+                .catch(function () { alert("That attachment couldn't be downloaded."); });
+        }
+
+        // New message: to anyone in your CMS network (the server re-checks the list on send).
+        var composeRecipients = [];
+        function openCompose() {
+            currentMessageId = null;
+            markSelectedRow();
+            pickedFiles.compose = [];
+            document.getElementById("messagePane").innerHTML =
+                "<div id='messageScroll'><h3>New secure message</h3>" +
+                "<label class='hint'>To</label><input id='composeFilter' placeholder='Search people...' style='width:100%;padding:6px;margin:4px 0;box-sizing:border-box' oninput='renderComposeTo()' />" +
+                "<div id='composeTo'><p class='hint'>Loading...</p></div>" +
+                "<div class='hint' id='composeToSummary' style='margin:4px 0 10px'></div>" +
+                "<label class='hint'>Subject</label><input id='composeSubject' style='width:100%;padding:6px;margin:4px 0 10px;box-sizing:border-box' />" +
+                "<label class='hint'>Message</label><textarea id='composeBody' rows='8' style='width:100%;padding:6px;margin:4px 0;box-sizing:border-box'></textarea>" +
+                "<div style='margin:4px 0 10px'><label class='attachPick'>&#128206; Attach files<input type='file' multiple style='display:none' onchange='addPickedFiles(this, \"compose\")' /></label>" +
+                "<span class='attachChips' id='composeFiles'></span></div>" +
+                "<div class='err' id='composeError'></div>" +
+                "<button class='primary' id='composeSendBtn' style='width:auto' onclick='sendCompose()'>Send</button> " +
+                "<button class='secondary' style='width:auto' onclick='closeCompose()'>Cancel</button></div>";
+            api("/inbox/compose-recipients")
+                .then(function (r) { if (r.status === 401) { logout(); throw new Error("unauthorized"); } return r.json(); })
+                .then(function (txt) {
+                    composeRecipients = (typeof txt === "string" ? JSON.parse(txt) : txt).map(function (u) { u.checked = false; return u; });
+                    renderComposeTo();
+                })
+                .catch(function () { var el = document.getElementById("composeTo"); if (el) el.innerHTML = "<p class='err'>Couldn't load the people you can write to.</p>"; });
+        }
+
+        function renderComposeTo() {
+            var box = document.getElementById("composeTo");
+            if (!box) return;
+            var q = (document.getElementById("composeFilter").value || "").trim().toLowerCase();
+            box.innerHTML = "";
+            var shown = composeRecipients.filter(function (u) {
+                return u.checked || !q || [u.Name, u.Email, u.Company].join(" ").toLowerCase().indexOf(q) > -1;
+            });
+            if (!shown.length) box.innerHTML = "<p class='hint'>No one matches.</p>";
+            shown.forEach(function (u) {
+                var l = document.createElement("label");
+                var cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.checked = u.checked;
+                cb.onchange = function () { u.checked = cb.checked; renderComposeSummary(); };
+                l.appendChild(cb);
+                l.appendChild(document.createTextNode(" " + u.Name + " (" + (u.Company || "") + ")"));
+                box.appendChild(l);
+            });
+            renderComposeSummary();
+        }
+
+        function renderComposeSummary() {
+            var picked = composeRecipients.filter(function (u) { return u.checked; });
+            var el = document.getElementById("composeToSummary");
+            if (el) el.textContent = picked.length ? "To: " + picked.map(function (u) { return u.Name; }).join(", ") : "Choose at least one person.";
+        }
+
+        function closeCompose() {
+            pickedFiles.compose = [];
+            document.getElementById("messagePane").innerHTML = EMPTY_PANE_HTML;
+        }
+
+        function sendCompose() {
+            var err = document.getElementById("composeError");
+            var to = composeRecipients.filter(function (u) { return u.checked; }).map(function (u) { return u.UID; });
+            var subject = document.getElementById("composeSubject").value.trim();
+            if (!to.length) { err.innerText = "Choose at least one person."; return; }
+            if (!subject) { err.innerText = "Enter a subject."; return; }
+            var btn = document.getElementById("composeSendBtn");
+            btn.disabled = true;
+            err.innerText = "";
+            api("/inbox/compose", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ToUIDs: to, Subject: subject, Body: document.getElementById("composeBody").value })
+            })
+                .then(function (r) { if (r.status === 401) { logout(); throw new Error("unauthorized"); } return r.json(); })
+                .then(function (res) {
+                    if (res.status !== "ok") {
+                        btn.disabled = false;
+                        err.innerText = { recipient_not_allowed: "One of those people can't be messaged from your account.", subject_required: "Enter a subject.", recipients_required: "Choose at least one person." }[res.status] || "The message couldn't be sent.";
+                        return;
+                    }
+                    var files = pickedFiles.compose;
+                    var done = function (failed) {
+                        pickedFiles.compose = [];
+                        setFolder("sent");
+                        openMessage(res.messageId);
+                        if (failed && failed.length) alert("The message was sent, but these attachments failed:\n" + failed.join("\n"));
+                    };
+                    if (!files.length) { done([]); return; }
+                    err.innerText = "Sent. Uploading " + files.length + " attachment(s)...";
+                    uploadAttachments(res.messageId, files).then(done);
+                })
+                .catch(function () { btn.disabled = false; err.innerText = "The message couldn't be sent."; });
+        }
+
+        function toggleForgotHelp() {
+            var help = document.getElementById("forgotHelp");
+            help.style.display = help.style.display === "block" ? "none" : "block";
+        }
+
+        function clearSearch() {
+            document.getElementById("searchInput").value = "";
+            renderList();
+            document.getElementById("searchInput").focus();
+        }
+
+        function renderList() {
+            var folder = currentFolder;
+            var q = document.getElementById("searchInput").value.trim().toLowerCase();
+            document.getElementById("searchClear").style.display = q ? "block" : "none";
+            var terms = q ? q.split(/\s+/) : [];
+            var taskFilter = document.getElementById("taskFilter").value;
+            // Every word typed must appear somewhere in the message's text.
+            var rows = folderRows.filter(function (m) {
+                if (taskFilter && m.TaskState !== taskFilter) return false;
+                if (terms.length === 0) return true;
+                var hay = [m.Subject, m.FromName, m.FromCompany, m.ToNames, m.ItemLabels].join(" ").toLowerCase();
+                return terms.every(function (t) { return hay.indexOf(t) > -1; });
+            });
+
+            var list = document.getElementById("inboxList");
+            list.innerHTML = "";
+            if (rows.length === 0) {
+                var emptyText = (q || taskFilter) ? "No messages match your filter."
+                    : { inbox: "No messages.", sent: "No sent messages.", archived: "No archived messages." }[folder];
+                list.innerHTML = "<p class='hint' style='padding:14px'>" + emptyText + "</p>";
+                return;
+            }
+            rows.forEach(function (m) {
+                var div = document.createElement("div");
+                // Unread emphasis only means something in the Inbox.
+                div.className = "msgRow" + (folder === "inbox" && !m.DTViewed ? " unread" : "");
+                div.onclick = function () { openMessage(m.MessageID); };
+                div.setAttribute("data-message-id", m.MessageID);
+                if (m.MessageID === currentMessageId) div.classList.add("selected");
+                var who = folder === "sent"
+                    ? "To " + escapeHtml(m.ToNames || "")
+                    : escapeHtml(m.FromName) + " (" + escapeHtml(m.FromCompany) + ")";
+                var tag = m.TaskState
+                    ? "<span class='taskTag " + m.TaskState + "'>" + (m.TaskState === "Pending" ? "Tasks pending" : m.TaskState === "Completed" ? "Tasks completed" : "Tasks cancelled") + "</span>"
+                    : "";
+                if (m.IsShared) tag += "<span class='taskTag Cancelled' title='A colleague shared a task in this message with you'>Shared with you</span>";
+                // Paperclip when the message has attachments (sql/031).
+                var clip = m.AttachmentCount > 0
+                    ? "<span class='clip' title='" + m.AttachmentCount + (m.AttachmentCount === 1 ? " attachment" : " attachments") + "'>&#128206;</span>"
+                    : "";
+                div.innerHTML = "<span class='subj'>" + clip + escapeHtml(m.Subject) + tag + "</span>" +
+                    "<span class='meta'>" + who + " &middot; " +
+                    new Date(m.DTCreated).toLocaleString() + "</span>";
+                list.appendChild(div);
+            });
+        }
+
+        var LIST_LOADING_HTML = "<div class='listLoading'><img src='loading.gif' width='20' height='20' alt='' />Please wait while messages are loading...</div>";
+
+        // showLoading: replace the list with the loading message first (first load, folder
+        // switch, Refresh). Background reloads (after opening a message) leave it alone.
+        function loadInbox(showLoading) {
+            var folder = currentFolder;
+            if (showLoading || folderRows.length === 0) document.getElementById("inboxList").innerHTML = LIST_LOADING_HTML;
+            var btn = document.getElementById("refreshBtn");
+            if (btn) btn.disabled = true;
+            api("/inbox?folder=" + folder)
+                .then(function (r) {
+                    if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+                    return r.text();
+                })
+                .then(function (txt) {
+                    if (folder !== currentFolder) return;
+                    folderRows = JSON.parse(txt);
+                    renderList();
+                })
+                .catch(function (ex) {
+                    console.log("loadInbox failed", ex);
+                    if (folder === currentFolder && folderRows.length === 0)
+                        document.getElementById("inboxList").innerHTML = "<p class='err' style='padding:14px'>Messages couldn't be loaded. Click &#8635; to try again.</p>";
+                })
+                .then(function () { if (btn) btn.disabled = false; });
+        }
+
+        // The &#8635; button: reloads the current folder and, if a message is open, its
+        // task statuses (without re-rendering open forms or reports).
+        function refreshMailbox() {
+            loadInbox(true);
+            if (currentMessageId) refreshTaskCards();
+        }
+
+        function openMessage(messageId) {
+            currentMessageId = messageId;
+            markSelectedRow();
+            api("/inbox/" + messageId)
+                .then(function (r) {
+                    if (!r.ok) throw new Error("not found");
+                    return r.json();
+                })
+                .then(function (res) {
+                    var msg = JSON.parse(res.message)[0];
+                    var items = JSON.parse(res.items);
+                    renderMessage(msg, items);
+                    loadDRViewers();
+                    fitExamFrames();
+                    loadInbox(); // refresh read/unread state
+                })
+                .catch(function () {
+                    document.getElementById("messagePane").innerHTML = "<p class='err'>Could not open this message.</p>";
+                });
+        }
+
+        // Outlines the open message's row in the list (see .msgRow.selected).
+        function markSelectedRow() {
+            document.querySelectorAll("#inboxList .msgRow").forEach(function (row) {
+                row.classList.toggle("selected", parseInt(row.getAttribute("data-message-id"), 10) === currentMessageId);
+            });
+        }
+
+        function renderMessage(msg, items) {
+            var pane = document.getElementById("messagePane");
+            // Server-supplied: a recipient gets Archive + Reply; someone who only
+            // AUTHORED the message (the Sent folder) gets a read-only view — archiving
+            // is a per-recipient flag they don't have, and every item-access check
+            // (IaViewerController/ItemController) requires being a recipient.
+            var isRecipient = !!msg.IsRecipient;
+            currentArchived = !!msg.IsArchived;
+            // A colleague the assignee shared a task with (sql/028): they get the recipient's
+            // view of just that task (the server sends only its item), without reply or archive.
+            var assigneeShare = msg.AssigneeSharedAccess || "";
+            var worksAsRecipient = isRecipient || !!assigneeShare;
+
+            var html = "<div id='messageScroll'>";
+            html += "<h3>" + escapeHtml(msg.Subject) + "</h3>";
+            // A colleague a task here was shared with (sql/026): they see it as its sender does.
+            if (msg.SharedAccess) {
+                html += "<div class='taskBanner' style='padding:6px 10px;margin-bottom:8px;border-radius:3px;background:#eef2f7;color:#334155'>" +
+                    "Shared with you by " + escapeHtml(msg.FromName) + " &middot; <b>" + (msg.SharedAccess === "manage" ? "Manage" : "Read only") + "</b>" +
+                    (msg.SharedAccess === "manage" ? " (you can review this task as " + escapeHtml(msg.FromName) + " would)" : "") + "</div>";
+            }
+            if (assigneeShare) {
+                html += "<div class='taskBanner' style='padding:6px 10px;margin-bottom:8px;border-radius:3px;background:#eef2f7;color:#334155'>" +
+                    "A colleague shared this task with you &middot; <b>" + (assigneeShare === "manage" ? "Manage" : "Read only") + "</b>" +
+                    (assigneeShare === "manage" ? " (you can work on it)" : " (you can follow it)") + "</div>";
+            }
+            // The conversation (sql/030): starts as just this message, then loadThread() fills in
+            // the rest of the thread around it.
+            html += "<div id='threadArea'>" + threadCardHtml({
+                MessageID: msg.MessageID, FromName: msg.FromName, FromCompany: msg.FromCompany,
+                ToNames: msg.ToNames, DTCreated: msg.DTCreated, Body: msg.Body, FromMe: !worksAsRecipient && !msg.SharedAccess
+            }, [], true) + "</div>";
+            html += "<div id='itemsArea'></div>";
+            html += "</div>";
+            // Deliberately OUTSIDE #messageScroll, as a fixed sibling — see the
+            // #replyBox/#messageScroll CSS comment above.
+            if (isRecipient) {
+                html += "<div id='replyBox'>" +
+                    "<input id='replySubject' placeholder='Subject' value='Re: " + escapeHtml(msg.Subject) + "' />" +
+                    "<textarea id='replyBody' placeholder='Message' rows='4' oninput='updateReplyButton()'></textarea>" +
+                    "<div style='margin:4px 0'><label class='attachPick'>&#128206; Attach<input type='file' multiple style='display:none' onchange='addPickedFiles(this, \"reply\")' /></label>" +
+                    "<span class='attachChips' id='replyFiles'></span></div>" +
+                    "<div class='err' id='replyError'></div>" +
+                    "<button class='primary' id='replySendBtn' onclick='sendReply()' disabled>Send Reply</button> " +
+                    "<button class='secondary' onclick='archiveCurrent()'>" + (currentArchived ? "Move to Inbox" : "Archive") + "</button>" +
+                    "</div>";
+            }
+            pane.innerHTML = html;
+            pickedFiles.reply = [];
+            loadThread(msg.MessageID);
+
+            var itemsArea = document.getElementById("itemsArea");
+            items.forEach(function (item) {
+                var card = document.createElement("div");
+                card.className = "itemCard";
+                // Lets refreshTaskCards() find this item's card again.
+                card.setAttribute("data-item-id", item.MessageItemID);
+                if (!worksAsRecipient) {
+                    // In Sent — see senderCardHtml().
+                    card.setAttribute("data-sender-view", "1");
+                    card.setAttribute("data-task-status", item.TaskStatus || "");
+                    card.innerHTML = senderCardHtml(item);
+                    itemsArea.appendChild(card);
+                } else if (item.ItemType === "IAFormRecord") {
+                    // Full CMSNEO field-edit/read-only parity, not a flat read-only
+                    // table — rendered by CMSNEO's own ported InteractiveForm.js
+                    // inside ia-viewer.html, running against this app's own gated
+                    // backend (IaViewerController). See that file's comments.
+                    // Bounded height, with ia-viewer.html's own body scrolling
+                    // internally once content exceeds it (see that file's CSS
+                    // comments — overflow/scrolling set from here on the <iframe>
+                    // tag itself doesn't reliably control an embedded document's
+                    // scrollability) — so a long record scrolls within itself
+                    // instead of pushing #replyBox down/out of view.
+                    // A task item that hasn't been started (ItemID "0") opens
+                    // ia-viewer.html in new-record mode — same page, same URL; the
+                    // server decides the mode from the item itself.
+                    if (String(item.ItemID) === "0" && item.TaskID && !item.IsMyTask && item.TaskStatus !== "Cancelled") {
+                        // Not started yet, and this viewer can follow it but not work on it (sql/028).
+                        card.innerHTML = taskBanner(item) + "<strong>" + escapeHtml(item.ItemLabel || "Form Application Record") + "</strong>" +
+                            "<p class='hint'>This form hasn't been started yet. You can follow it here once it's saved.</p>";
+                        itemsArea.appendChild(card);
+                        return;
+                    }
+                    if (item.TaskStatus === "Cancelled" && String(item.ItemID) === "0") {
+                        // Cancelled before the record was started (sql/021): nothing to open.
+                        card.innerHTML = taskBanner(item) + "<strong>" + escapeHtml(item.ItemLabel || "Form Application Record") + "</strong>" +
+                            "<p class='hint'>The sender cancelled this task, so there's nothing to fill out.</p>";
+                        itemsArea.appendChild(card);
+                        return;
+                    }
+                    card.innerHTML = taskBanner(item) + originBannerHtml(item) + reviewBarHtml(item) +
+                        "<div class='mbx-item-header' style='display:flex;justify-content:space-between;align-items:center'>" +
+                        "<strong>" + escapeHtml(item.ItemLabel || "Form Application Record") + "</strong>" +
+                        "<button class='secondary' onclick='mbxEnterFullscreen(this)'>View Fullscreen</button>" +
+                        "</div>" +
+                        "<iframe src='ia-viewer.html?messageItemId=" + item.MessageItemID + "' " +
+                        "style='width:100%;height:450px;border:1px solid #ccc;margin-top:8px;display:block' " +
+                        "title='" + escapeHtml(item.ItemLabel || "Form Application Record") + "'></iframe>";
+                    itemsArea.appendChild(card);
+                } else if (item.ItemType === "ExamTask") {
+                    // Exam task (sql/019): CMSNEO's own exam viewer, ported into
+                    // exam-viewer.html and gated by IaViewerController.Exam.cs.
+                    card.setAttribute("data-task-status", item.TaskStatus || "");
+                    card.innerHTML = taskBanner(item) + examFrameHtml(item, item.IsMyTask || !!assigneeShare);
+                    itemsArea.appendChild(card);
+                } else if (item.ItemType === "ExamRef") {
+                    // A reply's copy of an exam task (sql/020): the same exam, opened
+                    // in the assignee's or the assigner's view (decided server-side).
+                    card.innerHTML = originBannerHtml(item) + reviewBarHtml(item) + examFrameHtml(item, true);
+                    itemsArea.appendChild(card);
+                } else if (item.ItemType === "DRTask") {
+                    // Dynamic Report task (sql/008) — see drCardHtml().
+                    card.setAttribute("data-task-status", item.TaskStatus || "");
+                    card.innerHTML = drCardHtml(item);
+                    itemsArea.appendChild(card);
+                } else if (item.ItemType === "DynamicReport") {
+                    // A completed report carried onto a reply (sql/010) — no task.
+                    card.innerHTML = originBannerHtml(item) + reviewBarHtml(item) + "<strong>" + escapeHtml(item.ItemLabel || "Dynamic Report") + "</strong>" + drViewerHtml(item.MessageItemID);
+                    itemsArea.appendChild(card);
+                } else {
+                    var btn = document.createElement("button");
+                    btn.innerText = "Download: " + (item.ItemLabel || item.ItemType);
+                    btn.onclick = function () { downloadItem(item.MessageItemID, item.ItemLabel); };
+                    card.appendChild(btn);
+                    itemsArea.appendChild(card);
+                }
+            });
+        }
+
+        // An item as its sender sees it in Sent: read-only, but a task item shows its
+        // status — this is how the assigner follows progress — and, when the tasks
+        // were sent with "Require my review" (sql/009), a finished task gets a
+        // Mark as Completed button.
+        function senderCardHtml(item) {
+            var html = taskBanner(item) + originBannerHtml(item) + "<strong>" + escapeHtml(item.ItemLabel || item.ItemType) + "</strong>";
+            if (item.IsAssigner && item.TaskStatus === "Pending Review") {
+                html += "<p class='hint'>The assignee has finished this task. Check it in CMSNEO, then mark it completed.</p>" +
+                    "<button class='primary' id='reviewBtn_" + item.MessageItemID + "' onclick='reviewTask(" + item.MessageItemID + ")'>Mark as Completed</button>" +
+                    "<div class='err' id='reviewMsg_" + item.MessageItemID + "'></div>";
+            } else if (!isOpenableReport(item) && item.ItemType !== "ExamTask" && item.ItemType !== "ExamRef") {
+                html += "<p class='hint'>Attached to this message. Open it from the message you received, or in CMSNEO.</p>";
+            }
+            if (isOpenableReport(item)) html += drViewerHtml(item.MessageItemID);
+            if (item.ItemType === "ExamTask" || item.ItemType === "ExamRef") html += examFrameHtml(item, true, true);
+            return html;
+        }
+
+        // On a reply's copy of a task's record/report (sql/015): the original task's
+        // current status, for its assignee and assigner. Left out when the review bar
+        // below is shown instead (it already says Pending Review, with the button).
+        function originBannerHtml(item) {
+            if (!item.OriginTaskStatus || item.ReviewTaskItemID) return "";
+            var st = item.OriginTaskStatus;
+            var done = st === "Completed", pending = st === "Pending Review", cancelled = st === "Cancelled";
+            var label = { Saved: "Saved - waiting for Save for Use" }[st] || st;
+            var what = { FormApplication: "Form Application task", DynamicReport: "Dynamic Report task", Exam: "Exam task" }[item.OriginTaskType] || "Task";
+            var due = (item.OriginDueDate && !done && !cancelled) ? " &middot; Due " + escapeHtml(String(item.OriginDueDate).substring(0, 10)) : "";
+            return "<div class='taskBanner' style='padding:6px 10px;margin-bottom:8px;border-radius:3px;" +
+                (cancelled ? "background:#f1f3f4;color:#5f6368" : done ? "background:#e6f4ea;color:#1e6b34" : pending ? "background:#e8f0fe;color:#1a4a9c" : "background:#fff4e0;color:#8a5300") + "'>" +
+                "<b>" + what + ":</b> <b>" + escapeHtml(label) + "</b>" + due + "</div>";
+        }
+
+        // On a reply's copy of a finished record/report (sql/014): if the task it came
+        // from is waiting for THIS user's review, offer Mark as Completed right here.
+        // ReviewTaskItemID is that task's own item (on the original message); the
+        // server (MBX_ReviewTask) re-checks that the caller is its assigner.
+        function reviewBarHtml(item) {
+            if (!item.ReviewTaskItemID) return "";
+            var id = item.MessageItemID;
+            return "<div class='taskBanner' id='reviewBar_" + id + "' style='padding:6px 10px;margin-bottom:8px;border-radius:3px;background:#e8f0fe;color:#1a4a9c'>" +
+                "<b>Task:</b> finished, <b>Pending Review</b> &middot; check it, then " +
+                "<button class='primary' id='reviewReplyBtn_" + id + "' onclick='reviewFromReply(" + item.ReviewTaskItemID + "," + id + ")'>Mark as Completed</button> " +
+                "<span class='err' id='reviewReplyMsg_" + id + "'></span></div>";
+        }
+
+        function reviewFromReply(taskItemId, itemId) {
+            if (!confirm(MARK_COMPLETED_CONFIRM)) return;
+            var btn = document.getElementById("reviewReplyBtn_" + itemId);
+            btn.disabled = true;
+            api("/item/" + taskItemId + "/task/review", { method: "POST" })
+                .then(function (r) {
+                    if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+                    if (!r.ok) throw new Error("refused");
+                    var bar = document.getElementById("reviewBar_" + itemId);
+                    bar.style.background = "#e6f4ea";
+                    bar.style.color = "#1e6b34";
+                    bar.innerHTML = "<b>Task:</b> <b>Completed</b> &middot; you marked it completed.";
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    document.getElementById("reviewReplyMsg_" + itemId).innerText = "This task couldn't be marked completed. Refresh the message and try again.";
+                });
+        }
+
+        // Asked before either Mark as Completed button (Sent folder or a reply) acts —
+        // completing a task can't be undone from the mailbox.
+        var MARK_COMPLETED_CONFIRM = "Are you sure you want to mark this as completed?";
+
+        function reviewTask(messageItemId) {
+            if (!confirm(MARK_COMPLETED_CONFIRM)) return;
+            var btn = document.getElementById("reviewBtn_" + messageItemId);
+            var msg = document.getElementById("reviewMsg_" + messageItemId);
+            btn.disabled = true;
+            api("/item/" + messageItemId + "/task/review", { method: "POST" })
+                .then(function (r) {
+                    if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+                    if (!r.ok) throw new Error("refused");
+                    refreshTaskCards();
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    msg.innerText = "This task couldn't be marked completed. Refresh the message and try again.";
+                });
+        }
+
+        // Dynamic Report task card (sql/008): download the template, fill it in,
+        // upload it back. DRTaskController serves the template and passes the upload
+        // on to CMSNEO, which builds the report.
+        function drCardHtml(item) {
+            var html = taskBanner(item) + "<strong>" + escapeHtml(item.ItemLabel || "Dynamic Report") + "</strong><div style='margin-top:8px'>";
+            if (!item.IsMyTask) {
+                html += "<p class='hint'>Only the assignee, or a colleague they gave Manage access, can upload this report. You can follow it here.</p>";
+            } else {
+                html += "<button class='secondary' onclick='downloadDRTemplate(" + item.MessageItemID + ")'>Download template</button>";
+                if (item.TaskStatus === "Cancelled") {
+                    html = taskBanner(item) + "<strong>" + escapeHtml(item.ItemLabel || "Dynamic Report") + "</strong><div style='margin-top:8px'>" +
+                        "<p class='hint'>The sender cancelled this task, so there's nothing to upload.</p>";
+                } else if (item.TaskStatus === "Open") {
+                    html += "<p class='hint'>Fill in the template (keep its column headers), then upload it here.</p>" +
+                        "<input type='file' accept='.xlsx' id='drFile_" + item.MessageItemID + "' /> " +
+                        "<button class='primary' id='drUpload_" + item.MessageItemID + "' onclick='uploadDRTask(" + item.MessageItemID + ")'>Upload completed report</button>" +
+                        "<div class='err' id='drMsg_" + item.MessageItemID + "'></div>";
+                } else {
+                    html += "<p class='hint'>Your report was submitted and is now in Dynamic Reports." +
+                        (item.TaskStatus === "Pending Review" ? " It's waiting for the sender's review." : "") + "</p>";
+                }
+            }
+            html += "</div>";
+            if (isOpenableReport(item)) html += drViewerHtml(item.MessageItemID);
+            return html;
+        }
+
+        // After one task changes (a form's first save, a report upload), refresh just
+        // the task lines and Dynamic Report cards — never re-render the whole message,
+        // since a message can hold several tasks and the other forms' iframes may have
+        // unsaved input in them.
+        function refreshTaskCards() {
+            var messageId = currentMessageId;
+            api("/inbox/" + messageId)
+                .then(function (r) { if (!r.ok) throw new Error("not found"); return r.json(); })
+                .then(function (res) {
+                    if (messageId !== currentMessageId) return;
+                    JSON.parse(res.items).forEach(function (item) {
+                        if (!item.TaskID) return;
+                        var card = document.querySelector("#itemsArea [data-item-id='" + item.MessageItemID + "']");
+                        if (!card) return;
+                        // Re-render a whole card only when its status changed — it may
+                        // hold an open report viewer.
+                        var statusChanged = card.getAttribute("data-task-status") !== (item.TaskStatus || "");
+                        card.setAttribute("data-task-status", item.TaskStatus || "");
+                        if (card.getAttribute("data-sender-view")) {
+                            if (statusChanged) card.innerHTML = senderCardHtml(item);
+                            return;
+                        }
+                        if (item.ItemType === "DRTask") {
+                            if (statusChanged) card.innerHTML = drCardHtml(item);
+                            return;
+                        }
+                        var banner = card.querySelector(".taskBanner");
+                        if (banner) banner.outerHTML = taskBanner(item);
+                    });
+                    loadDRViewers();
+                    fitExamFrames(); // a re-rendered card's exam frame starts at its default height
+                })
+                .catch(function () { /* the cards just keep their previous status */ });
+        }
+
+        // Task line shown above an item that carries a task (MBX_Task, sql/006). For a
+        // form task MBX_GetMessage derives TaskStatus (sql/007): Open (not started),
+        // Saved (record saved but not released yet), Completed (released).
+        function taskBanner(item) {
+            if (!item.TaskID) return "";
+            var done = item.TaskStatus === "Completed";
+            var pending = item.TaskStatus === "Pending Review";
+            var cancelled = item.TaskStatus === "Cancelled";
+            var what = {
+                FormApplication: "Fill out this form and click Save for Use",
+                DynamicReport: "Fill in the Excel template and upload it",
+                Exam: "Answer the exam questions and supply the requested documents"
+            }[item.TaskType] || "Task";
+            var statusText = {
+                Completed: "Completed",
+                "Pending Review": "Pending Review",
+                Saved: "Saved - waiting for Save for Use",
+                Cancelled: "Cancelled by the sender"
+            }[item.TaskStatus] || "Open";
+            // DueDate is a SQL date (serialized as midnight) — show the date part as-is
+            // rather than letting a timezone conversion shift it a day.
+            var due = (item.DueDate && !cancelled) ? " &middot; Due " + escapeHtml(String(item.DueDate).substring(0, 10)) : "";
+            // The task's own assignee can share it with colleagues in their company (sql/028).
+            var share = (item.IsAssigneeOwner && !cancelled)
+                ? " <a style='float:right;cursor:pointer;color:#2c6bd6;font-weight:normal' onclick='openTaskShare(" + item.TaskID + ")'>Share with a colleague</a>"
+                : "";
+            return "<div class='taskBanner' style='padding:6px 10px;margin-bottom:8px;border-radius:3px;" +
+                (cancelled ? "background:#f1f3f4;color:#5f6368" : done ? "background:#e6f4ea;color:#1e6b34" : pending ? "background:#e8f0fe;color:#1a4a9c" : "background:#fff4e0;color:#8a5300") + "'>" +
+                share + "<b>Task:</b> " + what + due + " &middot; <b>" + statusText + "</b></div>";
+        }
+
+        // ---- Dynamic Report viewer (sql/010, DRViewController) ----------------
+        // A completed report: its rows in a table; clicking a row opens a panel with
+        // its values (editable when it's your own company's row, read-only otherwise),
+        // notes, and attachments. Every request is access-checked server-side.
+
+        // An exam frame takes exactly the space left in the message pane below it
+        // (above the reply box), so the message itself doesn't scroll and push its
+        // header off-screen — the exam's own question list scrolls instead. Never
+        // smaller than MIN_EXAM_FRAME; re-fitted when the window is resized.
+        var MIN_EXAM_FRAME = 320;
+        function fitExamFrames() {
+            var pane = document.getElementById("messagePane");
+            var scroller = document.getElementById("messageScroll");
+            var reply = document.getElementById("replyBox");
+            if (!pane || !scroller) return;
+            var frames = Array.prototype.filter.call(
+                document.querySelectorAll("#messageScroll iframe.mbx-exam-frame"),
+                function (f) { return !f.classList.contains("mbx-iframe-fullscreen"); });
+            if (frames.length === 0) return;
+            // The height #messageScroll can have without scrolling.
+            var room = pane.clientHeight - (reply ? reply.offsetHeight : 0);
+            // First pass: give the (last) exam frame everything below its top edge.
+            var frame = frames[frames.length - 1];
+            var top = frame.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+            frame.style.height = Math.max(MIN_EXAM_FRAME, Math.floor(room - top)) + "px";
+            // Second pass: whatever still overflows (the frame's border, the card's
+            // padding and margin below it, ...) is measured, not guessed, and trimmed.
+            var over = scroller.scrollHeight - room;
+            if (over > 0) frame.style.height = Math.max(MIN_EXAM_FRAME, frame.offsetHeight - over - 2) + "px";
+        }
+        window.addEventListener("resize", fitExamFrames);
+
+        // An exam in its frame (exam-viewer.html). Which view it opens in — the
+        // assignee's or the assigner's management view — is decided server-side
+        // (IaViewerController.Exam.cs); withFrame false shows just the label.
+        // noHeader leaves out the label row when the caller already printed it.
+        function examFrameHtml(item, withFrame, noHeader) {
+            var label = escapeHtml(item.ItemLabel || "Exam");
+            var html = noHeader ? "" :
+                "<div class='mbx-item-header' style='display:flex;justify-content:space-between;align-items:center'>" +
+                "<strong>" + label + "</strong>" +
+                (withFrame ? "<button class='secondary' onclick='mbxEnterFullscreen(this)'>View Fullscreen</button>" : "") +
+                "</div>";
+            if (!withFrame) return html + "<p class='hint'>This task is assigned to someone else.</p>";
+            if (noHeader) html += "<div style='text-align:right'><button class='secondary' onclick='mbxEnterFullscreen(this)'>View Fullscreen</button></div>";
+            return html + "<iframe class='mbx-exam-frame' src='exam-viewer.html?messageItemId=" + item.MessageItemID + "' " +
+                "style='width:100%;height:550px;border:1px solid #ccc;margin-top:8px;display:block' title='" + label + "'></iframe>";
+        }
+
+        function isOpenableReport(item) {
+            return (item.ItemType === "DRTask" || item.ItemType === "DynamicReport") && item.ItemID && item.ItemID !== "0";
+        }
+
+        function drViewerHtml(messageItemId) {
+            return "<div class='drView' id='drView_" + messageItemId + "' data-item='" + messageItemId + "'>" +
+                "<p class='hint'>Loading report ...</p></div>";
+        }
+
+        // Loads every viewer on the page that hasn't been loaded yet.
+        function loadDRViewers() {
+            document.querySelectorAll(".drView:not([data-loaded])").forEach(function (div) {
+                div.setAttribute("data-loaded", "1");
+                loadDRReport(parseInt(div.getAttribute("data-item"), 10));
+            });
+        }
+
+        // Columns NEO_GetDynamicReportsALL2 returns that aren't report data.
+        function drIsDataColumn(key) {
+            return key.indexOf("xxx") !== 0 && key.indexOf("DR_") !== 0 && ["xCID", "hdrs"].indexOf(key) === -1;
+        }
+
+        function loadDRReport(messageItemId, reopenDrid) {
+            var div = document.getElementById("drView_" + messageItemId);
+            if (!div) return;
+            api("/item/" + messageItemId + "/report")
+                .then(function (r) { if (!r.ok) throw new Error("denied"); return r.text(); })
+                .then(function (txt) {
+                    var rows = JSON.parse(txt).filter(function (d) { return d.xxxIX > 0; });
+                    if (rows.length === 0) { div.innerHTML = "<p class='hint'>This report has no rows you can view.</p>"; return; }
+
+                    var cols = Object.keys(rows[0]).filter(drIsDataColumn);
+                    // Attachments last, as in CMSNEO.
+                    cols = cols.filter(function (c) { return c !== "Attachments"; })
+                        .concat(cols.indexOf("Attachments") > -1 ? ["Attachments"] : []);
+
+                    var html = "<p class='hint' style='margin:8px 0 0 0'>Click a row to see its details, notes and attachments.</p>" +
+                        "<div class='drTableWrap'><table class='drTable'><tr>" +
+                        cols.map(function (c) { return "<th>" + escapeHtml(c.replace(/_/g, " ")) + "</th>"; }).join("") + "</tr>";
+                    rows.forEach(function (row) {
+                        html += "<tr class='drRow' id='drRow_" + messageItemId + "_" + row.xxxID + "' onclick='openDRRow(" + messageItemId + "," + row.xxxID + ")'>" +
+                            cols.map(function (c) { return "<td>" + escapeHtml(row[c] == null ? "" : row[c]) + "</td>"; }).join("") + "</tr>";
+                    });
+                    html += "</table></div><div id='drPanel_" + messageItemId + "'></div>";
+                    div.innerHTML = html;
+                    if (reopenDrid) openDRRow(messageItemId, reopenDrid);
+                })
+                .catch(function () { div.innerHTML = "<p class='err'>This report couldn't be loaded.</p>"; });
+        }
+
+        function openDRRow(messageItemId, drid) {
+            var panel = document.getElementById("drPanel_" + messageItemId);
+            if (!panel) return;
+            document.querySelectorAll("#drView_" + messageItemId + " tr.drRow").forEach(function (tr) {
+                tr.classList.toggle("selected", tr.id === "drRow_" + messageItemId + "_" + drid);
+            });
+            panel.innerHTML = "<div class='drPanel'><p class='hint'>Loading ...</p></div>";
+
+            api("/item/" + messageItemId + "/report/row/" + drid)
+                .then(function (r) { if (!r.ok) throw new Error("denied"); return r.json(); })
+                .then(function (res) { renderDRRow(messageItemId, drid, res); })
+                .catch(function () { panel.innerHTML = "<div class='drPanel'><p class='err'>This row couldn't be loaded.</p></div>"; });
+        }
+
+        function renderDRRow(messageItemId, drid, res) {
+            var panel = document.getElementById("drPanel_" + messageItemId);
+            var fields = JSON.parse(res.fields)[0] || {};
+            var docs = JSON.parse(res.docs);
+            var notes = JSON.parse(res.notes);
+            var shares = JSON.parse(res.shareCompanies);
+            var p = messageItemId + "_" + drid;
+
+            // Fields — same rules as CMSNEO's DynamicRecordOptions(): CID/Inactive/
+            // ReportID hidden; Loaded By/Company/Status/Attachments always read-only;
+            // everything else editable only on your own company's row.
+            var html = "<div class='drPanel'><button class='linkBtn' style='float:right' onclick='closeDRRow(" + messageItemId + ")'>Close</button>" +
+                "<h4 style='margin-top:0'>Details</h4><table class='drFields' style='width:100%'>";
+            Object.keys(fields).forEach(function (key) {
+                if (["CID", "Inactive", "ReportID"].indexOf(key) > -1) return;
+                var val = fields[key] == null || fields[key] === "1900-01-01T00:00:00" ? "" : String(fields[key]);
+                var label = "<td style='width:30%;white-space:nowrap'>" + escapeHtml(key.trim().replace(/_/g, " ")) + "</td>";
+                if (!res.isMine || ["Loaded_By", "Company", "Status", "Attachments"].indexOf(key) > -1) {
+                    html += "<tr>" + label + "<td>" + escapeHtml(val) + "</td></tr>";
+                } else {
+                    var isDate = key.toLowerCase().indexOf("date") > -1 && (val === "" || /^\d{4}-\d{2}-\d{2}/.test(val));
+                    html += "<tr>" + label + "<td><input name='drVal_" + p + "' data-key='" + escapeHtml(key) + "'" +
+                        (isDate ? " type='date' value='" + escapeHtml(val.substring(0, 10)) + "'" : " value='" + escapeHtml(val) + "'") +
+                        " /></td></tr>";
+                }
+            });
+            html += "</table>";
+            if (res.isMine) {
+                html += "<button class='primary' id='drSave_" + p + "' onclick='saveDRRow(" + messageItemId + "," + drid + ")'>Submit Changes</button> " +
+                    "<span class='err' id='drSaveMsg_" + p + "'></span>";
+            }
+
+            // Notes — one entry per note (NEO_GetFileNotes returns a row per shared company).
+            var byNid = {}, order = [];
+            notes.forEach(function (n) {
+                if (!byNid[n.NID]) { byNid[n.NID] = { n: n, shared: [] }; order.push(n.NID); }
+                if (n.Shared_With) byNid[n.NID].shared.push(n.Shared_With);
+            });
+            html += "<h4>Notes</h4>";
+            if (order.length === 0) {
+                html += "<p class='hint'>No notes yet.</p>";
+            } else {
+                html += "<table class='drList'>";
+                order.forEach(function (nid) {
+                    var x = byNid[nid];
+                    html += "<tr><td>" + escapeHtml(x.n.Note).replace(/\n/g, "<br/>") + "</td>" +
+                        "<td style='white-space:nowrap'>" + escapeHtml(x.n.Created_By) + "<br/>" + new Date(x.n.Date_Created).toLocaleString() + "</td>" +
+                        "<td>" + (x.shared.length ? "Shared with " + escapeHtml(x.shared.join(", ")) : "Your company only") + "</td>" +
+                        "<td>" + (x.n.CreatedByUID === res.myUID
+                            ? "<button class='linkBtn' onclick=\"deleteDRNote(" + messageItemId + "," + drid + ",'" + escapeHtml(x.n.NID) + "')\">Delete</button>"
+                            : "") +
+                        "</td></tr>";
+                });
+                html += "</table>";
+            }
+            html += "<textarea id='drNote_" + p + "' rows='2' style='width:100%;box-sizing:border-box;margin-top:6px' placeholder='Add a note'></textarea>";
+            if (shares.length > 0) {
+                html += "<div class='hint'>Share with: " + shares.map(function (c) {
+                    return "<label style='margin-right:10px'><input type='checkbox' name='drShare_" + p + "' value='" + c.CID + "' checked /> " +
+                        escapeHtml(c.Company) + "</label>";
+                }).join("") + "</div>";
+            }
+            html += "<button class='secondary' onclick='addDRNote(" + messageItemId + "," + drid + ")'>Add note</button> " +
+                "<span class='err' id='drNoteMsg_" + p + "'></span>";
+
+            // Attachments
+            html += "<h4>Attachments</h4>";
+            if (docs.length === 0) {
+                html += "<p class='hint'>No attachments yet.</p>";
+            } else {
+                html += "<table class='drList'>";
+                docs.forEach(function (d) {
+                    html += "<tr><td><button class='linkBtn' onclick='downloadDRDoc(" + messageItemId + "," + drid + "," + d.FID + ")'>" +
+                        escapeHtml(d.Filename) + "</button></td>" +
+                        "<td>" + escapeHtml(d.Created_By) + " (" + escapeHtml(d.Company) + ")</td>" +
+                        "<td>" + new Date(d.Date_Loaded).toLocaleString() + "</td>" +
+                        "<td>" + (d.IsMine ? "<button class='linkBtn' onclick='deleteDRDoc(" + messageItemId + "," + drid + "," + d.FID + ")'>Delete</button>" : "") +
+                        "</td></tr>";
+                });
+                html += "</table>";
+            }
+            html += "<input type='file' multiple id='drDocs_" + p + "' style='margin-top:6px' /> " +
+                "<button class='secondary' onclick='uploadDRDocs(" + messageItemId + "," + drid + ")'>Upload</button> " +
+                "<span class='err' id='drDocMsg_" + p + "'></span>";
+
+            panel.innerHTML = html + "</div>";
+        }
+
+        function closeDRRow(messageItemId) {
+            document.getElementById("drPanel_" + messageItemId).innerHTML = "";
+            document.querySelectorAll("#drView_" + messageItemId + " tr.drRow.selected").forEach(function (tr) { tr.classList.remove("selected"); });
+        }
+
+        function saveDRRow(messageItemId, drid) {
+            var p = messageItemId + "_" + drid;
+            var keys = [], vals = [];
+            document.getElementsByName("drVal_" + p).forEach(function (inp) {
+                keys.push(inp.getAttribute("data-key"));
+                vals.push(inp.value);
+            });
+            var btn = document.getElementById("drSave_" + p);
+            btn.disabled = true;
+            api("/item/" + messageItemId + "/report/row/" + drid, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ Keys: keys, Vals: vals })
+            })
+                .then(function (r) {
+                    if (!r.ok) throw new Error("failed");
+                    loadDRReport(messageItemId, drid); // table + this row, with the saved values
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    document.getElementById("drSaveMsg_" + p).innerText = "Your changes couldn't be saved.";
+                });
+        }
+
+        function addDRNote(messageItemId, drid) {
+            var p = messageItemId + "_" + drid;
+            var note = document.getElementById("drNote_" + p).value.trim();
+            var msg = document.getElementById("drNoteMsg_" + p);
+            if (note === "") { msg.innerText = "Type a note first."; return; }
+            var share = [];
+            document.getElementsByName("drShare_" + p).forEach(function (c) { if (c.checked) share.push(parseInt(c.value, 10)); });
+            api("/item/" + messageItemId + "/report/row/" + drid + "/notes", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ Note: note, ShareWith: share })
+            })
+                .then(function (r) { if (!r.ok) throw new Error("failed"); openDRRow(messageItemId, drid); })
+                .catch(function () { msg.innerText = "The note couldn't be added."; });
+        }
+
+        function deleteDRNote(messageItemId, drid, nid) {
+            if (!confirm("Delete this note?")) return;
+            api("/item/" + messageItemId + "/report/row/" + drid + "/notes/" + encodeURIComponent(nid), { method: "DELETE" })
+                .then(function (r) { if (!r.ok) throw new Error("failed"); openDRRow(messageItemId, drid); })
+                .catch(function () { alert("The note couldn't be deleted."); });
+        }
+
+        function uploadDRDocs(messageItemId, drid) {
+            var p = messageItemId + "_" + drid;
+            var input = document.getElementById("drDocs_" + p);
+            var msg = document.getElementById("drDocMsg_" + p);
+            if (!input.files.length) { msg.innerText = "Choose a file first."; return; }
+            var fd = new FormData();
+            for (var i = 0; i < input.files.length; i++) fd.append("file" + i, input.files[i]);
+            msg.innerText = "Uploading ...";
+            api("/item/" + messageItemId + "/report/row/" + drid + "/docs", { method: "POST", body: fd })
+                .then(function (r) {
+                    if (!r.ok) throw new Error("failed");
+                    loadDRReport(messageItemId, drid); // the Attachments count in the table changes too
+                })
+                .catch(function () { msg.innerText = "The upload failed."; });
+        }
+
+        function deleteDRDoc(messageItemId, drid, fid) {
+            if (!confirm("Delete this attachment?")) return;
+            api("/item/" + messageItemId + "/report/row/" + drid + "/docs/" + fid, { method: "DELETE" })
+                .then(function (r) { if (!r.ok) throw new Error("failed"); loadDRReport(messageItemId, drid); })
+                .catch(function () { alert("The attachment couldn't be deleted."); });
+        }
+
+        // The server sends the attachment's own filename (Content-Disposition).
+        function downloadDRDoc(messageItemId, drid, fid) {
+            api("/item/" + messageItemId + "/report/row/" + drid + "/docs/" + fid)
+                .then(function (r) {
+                    if (!r.ok) throw new Error("denied");
+                    var cd = r.headers.get("Content-Disposition") || "";
+                    var m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+                    var name = m ? decodeURIComponent(m[1]) : "attachment";
+                    return r.blob().then(function (blob) { return { blob: blob, name: name }; });
+                })
+                .then(function (f) {
+                    var url = URL.createObjectURL(f.blob);
+                    var a = document.createElement("a");
+                    a.href = url;
+                    a.download = f.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                })
+                .catch(function () { alert("The attachment couldn't be downloaded."); });
+        }
+
+        function downloadDRTemplate(messageItemId) {
+            api("/item/" + messageItemId + "/drtask/template")
+                .then(function (r) {
+                    if (!r.ok) throw new Error("denied");
+                    var cd = r.headers.get("Content-Disposition") || "";
+                    var m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+                    var name = m ? decodeURIComponent(m[1]) : "template.xlsx";
+                    return r.blob().then(function (blob) { return { blob: blob, name: name }; });
+                })
+                .then(function (f) {
+                    var url = URL.createObjectURL(f.blob);
+                    var a = document.createElement("a");
+                    a.href = url;
+                    a.download = f.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                })
+                .catch(function () { alert("The template could not be downloaded."); });
+        }
+
+        // CMSNEO's MailboxDRTaskSubmit status codes, in words.
+        var drTaskErrors = {
+            already_completed: "This task has already been completed.",
+            file_required: "Choose the filled-in Excel file first.",
+            file_unreadable: "That file couldn't be read. Upload an .xlsx file.",
+            no_rows: "The file has no data rows.",
+            too_many_rows: "The file has more than 500 rows.",
+            forbidden: "Your account doesn't have access to Dynamic Reports.",
+            proxy_failed: "The report couldn't be submitted right now. Please try again later."
+        };
+
+        function uploadDRTask(messageItemId) {
+            var input = document.getElementById("drFile_" + messageItemId);
+            var msg = document.getElementById("drMsg_" + messageItemId);
+            var btn = document.getElementById("drUpload_" + messageItemId);
+            msg.innerHTML = "";
+            if (!input.files[0]) { msg.innerText = drTaskErrors.file_required; return; }
+
+            var fd = new FormData();
+            fd.append("file", input.files[0]);
+            btn.disabled = true;
+            msg.innerText = "Uploading ...";
+            api("/item/" + messageItemId + "/drtask/submit", { method: "POST", body: fd })
+                .then(function (r) {
+                    if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+                    if (!r.ok) throw new Error("denied");
+                    return r.json();
+                })
+                .then(function (res) {
+                    if (res.status === "ok") {
+                        refreshTaskCards();
+                        return;
+                    }
+                    btn.disabled = false;
+                    if (res.status === "headers_mismatch") {
+                        var parts = [];
+                        if (res.missing && res.missing.length) parts.push("Missing columns: " + res.missing.join(", "));
+                        if (res.extra && res.extra.length) parts.push("Columns not in the template: " + res.extra.join(", "));
+                        msg.innerText = "The file's columns don't match the template. " + parts.join(". ") + ".";
+                    } else {
+                        msg.innerText = drTaskErrors[res.status] || ("The report couldn't be submitted (" + res.status + ").");
+                    }
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    msg.innerText = "The report couldn't be submitted.";
+                });
+        }
+
+        function downloadItem(messageItemId, label) {
+            api("/item/" + messageItemId)
+                .then(function (r) {
+                    if (!r.ok) throw new Error("denied");
+                    return r.blob();
+                })
+                .then(function (blob) {
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement("a");
+                    a.href = url;
+                    a.download = label || "download";
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                })
+                .catch(function () { alert("You no longer have access to this item."); });
+        }
+
+        // Send Reply stays disabled until the message body has something in it
+        // (whitespace doesn't count).
+        function updateReplyButton() {
+            var btn = document.getElementById("replySendBtn");
+            if (btn) btn.disabled = document.getElementById("replyBody").value.trim() === "";
+        }
+
+        function sendReply() {
+            var errDiv = document.getElementById("replyError");
+            if (document.getElementById("replyBody").value.trim() === "") return;
+            var body = {
+                Subject: document.getElementById("replySubject").value,
+                Body: document.getElementById("replyBody").value
+            };
+            api("/inbox/" + currentMessageId + "/reply", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            })
+                .then(function (r) {
+                    if (!r.ok) throw new Error("failed");
+                    return r.text();
+                })
+                .then(function (txt) {
+                    // The new reply's MessageID, for its attachments (sql/029).
+                    var rows = []; try { rows = JSON.parse(txt); if (typeof rows === "string") rows = JSON.parse(rows); } catch (e) { }   // Ok(serialized table) arrives JSON-encoded twice
+                    var newId = rows.length ? rows[0].MessageID : null;
+                    var files = pickedFiles.reply || [];
+                    document.getElementById("replyBody").value = "";
+                    updateReplyButton();
+                    if (!newId || !files.length) { errDiv.innerText = "Reply sent."; loadInbox(); return; }
+                    errDiv.innerText = "Reply sent. Uploading " + files.length + " attachment(s)...";
+                    return uploadAttachments(newId, files).then(function (failed) {
+                        pickedFiles.reply = [];
+                        renderPickedFiles("reply");
+                        errDiv.innerText = failed.length ? "Reply sent, but these attachments failed: " + failed.join("; ") : "Reply sent with " + files.length + " attachment(s).";
+                        loadInbox();
+                    });
+                })
+                .catch(function () { errDiv.innerText = "Could not send reply."; });
+        }
+
+        // Toggles: Archive from the Inbox, Move to Inbox from the Archived folder
+        // (the button label is set from the message's own IsArchived in renderMessage).
+        // On success the message leaves the current list, so close it and refresh.
+        function archiveCurrent() {
+            var errDiv = document.getElementById("replyError");
+            api("/inbox/" + currentMessageId + "/archive", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ Archived: !currentArchived })
+            })
+                .then(function (r) {
+                    if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+                    if (!r.ok) throw new Error("failed");
+                    currentMessageId = null;
+                    document.getElementById("messagePane").innerHTML = EMPTY_PANE_HTML;
+                    loadInbox();
+                })
+                .catch(function (ex) {
+                    if (ex.message !== "unauthorized" && errDiv) errDiv.innerText = "Could not update this message.";
+                });
+        }
+
+        function escapeHtml(s) {
+            return String(s == null ? "" : s)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+
+        // Companion to ia-viewer.html's mbxNotifyPopupState() (js/newOpts.js) — that
+        // iframe can't make its own popups escape its box, so instead it tells us
+        // when one opens/closes and we grow the <iframe> ELEMENT itself to fill the
+        // viewport. event.source (not an id) identifies which iframe sent it, since
+        // a message can be open with several IAFormRecord items/iframes on screen.
+        var mbxFullscreenFrame = null;
+        // True once fullscreen was entered via the "View Fullscreen" button rather
+        // than a popup — while true, an internal popup opening/closing (View PDF, a
+        // confirm dialog, the attachment viewer — ViewDisp()'s UI has several) must
+        // NOT auto-exit fullscreen on its own "closed" message; only the explicit
+        // Exit Fullscreen button should end a manually-entered fullscreen.
+        var mbxManualFullscreen = false;
+
+        // Single choke point for entering/exiting the fullscreen visual state, so
+        // the frame class, the Exit button, and hiding itemCard headers (see the
+        // .mbx-item-header CSS comment) can never drift out of sync across the four
+        // places fullscreen can be triggered/ended (a popup opening, a popup closing,
+        // the View Fullscreen button, the Exit Fullscreen button).
+        function mbxSetFullscreen(frame) {
+            if (mbxFullscreenFrame && mbxFullscreenFrame !== frame) {
+                mbxFullscreenFrame.classList.remove("mbx-iframe-fullscreen");
+            }
+            frame.classList.add("mbx-iframe-fullscreen");
+            mbxFullscreenFrame = frame;
+            document.body.classList.add("mbx-fullscreen-active");
+            document.getElementById("mbxExitFullscreenBtn").style.display = "block";
+        }
+
+        function mbxClearFullscreen() {
+            if (mbxFullscreenFrame) mbxFullscreenFrame.classList.remove("mbx-iframe-fullscreen");
+            mbxFullscreenFrame = null;
+            mbxManualFullscreen = false;
+            document.body.classList.remove("mbx-fullscreen-active");
+            document.getElementById("mbxExitFullscreenBtn").style.display = "none";
+        }
+
+        window.addEventListener("message", function (event) {
+            if (event.origin !== window.location.origin) return;
+            if (event.data && event.data.mbxActivity) { resetIdle(); return; }
+            // ia-viewer.html's mbxRecordSaved(): a record was just saved. Reload only
+            // that iframe (a new-record task's item now points at the saved record)
+            // and refresh the task lines — not the whole message, whose other forms
+            // may have unsaved input.
+            if (event.data && event.data.mbxRecordSaved) {
+                var saved = document.querySelectorAll("#messagePane iframe");
+                for (var j = 0; j < saved.length; j++) {
+                    if (saved[j].contentWindow === event.source) {
+                        if (mbxFullscreenFrame === saved[j]) mbxClearFullscreen();
+                        saved[j].src = saved[j].src;
+                        break;
+                    }
+                }
+                refreshTaskCards();
+                return;
+            }
+            if (!event.data || (event.data.mbxPopup !== "open" && event.data.mbxPopup !== "closed")) return;
+
+            var frames = document.querySelectorAll("#messagePane iframe");
+            for (var i = 0; i < frames.length; i++) {
+                if (frames[i].contentWindow === event.source) {
+                    if (event.data.mbxPopup === "open") {
+                        mbxSetFullscreen(frames[i]);
+                    } else if (mbxFullscreenFrame === frames[i] && !mbxManualFullscreen) {
+                        mbxClearFullscreen();
+                    }
+                    break;
+                }
+            }
+        });
+
+        // Lets a user go fullscreen straight away to read/work a record comfortably,
+        // without first having to open some popup inside it just to trigger
+        // mbxNotifyPopupState. `btn` is the clicked button itself — its own itemCard
+        // sibling iframe is the one to fullscreen (a message can have more than one
+        // IAFormRecord item/iframe on screen at once).
+        function mbxEnterFullscreen(btn) {
+            var frame = btn.closest(".itemCard").querySelector("iframe");
+            if (!frame) return;
+            mbxSetFullscreen(frame);
+            mbxManualFullscreen = true;
+        }
+
+        // Manual escape hatch (see the button's CSS comment) — just undoes the visual
+        // fullscreen; it doesn't reach into the iframe to close the popup itself, so
+        // the ported code's own PopUp() state is left alone.
+        function mbxExitFullscreen() {
+            mbxClearFullscreen();
+        }
+
+        // One-time handoff codes from CMSNEO's Items Alerted On (sql/011): a 60-second,
+        // single-use code for a user CMSNEO has already logged in with the same
+        // password + 2FA. Exchanged here for this app's own login. On failure nothing
+        // changes (existing session, or the login screen).
+        function redeemHandoff(code) {
+            return fetch(apiBase + "/auth/handoff", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ Code: code })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res.status !== "ok") return null;
+                    token = res.token;
+                    sessionStorage.setItem("mbxToken", token);
+                    return res;
+                })
+                .catch(function () { return null; });
+        }
+
+        // CMSNEO reuses this tab when it's already open: instead of reloading it, it
+        // posts {mbxHandoff: code} here (see OpenMailboxMessage in CMSNEO's global.js).
+        // Accepted only from CMSNEO's own origin (auth/cms-origin) — otherwise another
+        // site holding a reference to this tab could push its own code and switch the
+        // user into a different account. Acknowledged so CMSNEO doesn't fall back to
+        // reloading the tab.
+        var cmsOrigin = null;
+        api("/auth/cms-origin")
+            .then(function (r) { return r.json(); })
+            .then(function (res) { cmsOrigin = res.origin || null; })
+            .catch(function () { });
+
+        window.addEventListener("message", function (event) {
+            if (!event.data || typeof event.data.mbxHandoff !== "string") return;
+            if (!cmsOrigin || event.origin !== cmsOrigin) return;
+            if (event.source) event.source.postMessage({ mbxHandoffAck: true }, event.origin);
+
+            redeemHandoff(event.data.mbxHandoff).then(function (res) {
+                if (!res) return;
+                if (document.getElementById("appScreen").style.display !== "block") {
+                    if (res.messageId) window.history.replaceState({}, "", window.location.pathname + "?message=" + res.messageId);
+                    showApp(); // opens ?message= once and strips it
+                } else if (res.messageId) {
+                    // Already in the app (possibly as someone else before) — show this
+                    // message from the Inbox.
+                    if (currentFolder !== "inbox") setFolder("inbox"); else loadInbox();
+                    openMessage(res.messageId);
+                }
+            });
+        });
+
+        // Startup. ?handoff=<code> (a fresh tab from CMSNEO): strip it from the address
+        // bar first, then exchange it.
+        (function startup() {
+            var code = new URLSearchParams(window.location.search).get("handoff");
+            if (!code) { if (token) showApp(); else showLogin(); return; }
+
+            window.history.replaceState({}, "", window.location.pathname);
+            redeemHandoff(code).then(function (res) {
+                // showApp() opens ?message= once and strips it again.
+                if (res && res.messageId) window.history.replaceState({}, "", window.location.pathname + "?message=" + res.messageId);
+                if (token) showApp(); else showLogin();
+            });
+        })();
+    </script>
+</body>
+</html>

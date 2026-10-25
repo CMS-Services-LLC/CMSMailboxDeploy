@@ -1,0 +1,33 @@
+# Deploys the already-built CMSMailbox binaries on the prod branch to prodcmsmailbox.
+# Same as deploy-qa.yml on the qa branch: GitHub pushes to Azure, instead of Deployment
+# Center's GitHub sync (which kept failing with 403 after the repo moved).
+# Needs repo secret AZURE_WEBAPP_PUBLISH_PROFILE_PROD (prodcmsmailbox's publish profile).
+name: Deploy prod to prodcmsmailbox
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ship only the binaries, not git metadata or this workflow.
+      - name: Stage files
+        run: |
+          mkdir "$RUNNER_TEMP/site"
+          rsync -a --exclude='.git' --exclude='.github' ./ "$RUNNER_TEMP/site/"
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: prodcmsmailbox
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_PROD }}
+          package: ${{ runner.temp }}/site
