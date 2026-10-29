@@ -34,6 +34,31 @@ let isReferenceSourceActive = false;
 //code:jk-20240904:109pm - added hasFocused for initial set focus
 var hasFocused = false;
 
+//code:20261027 the exam stays hidden behind "Please wait while the exam is loading ..." until the build and its
+//async fills (answers, scores, last-view layers) have all finished. Each load gets an id so a slow callback from a
+//previously selected exam can't reveal the current one; a 60s fallback reveals anyway if a call never comes back.
+var mgtExamLoadID = 0;
+function mgtExamLoadBegin(steps) {
+    var id = ++mgtExamLoadID;
+    ["ExamOpts", "availExamsInner"].forEach(function (d) {
+        var el = document.getElementById(d);
+        if (el) el.style.display = "none";
+    });
+    var done = function () {
+        if (id != mgtExamLoadID || --steps > 0) return;
+        mgtExamLoadID++;
+        var msg = document.getElementById("examLoadingMsg");
+        if (msg) msg.remove();
+        ["ExamOpts", "availExamsInner"].forEach(function (d) {
+            var el = document.getElementById(d);
+            if (el) el.style.display = "";
+        });
+        FocusLastQuestion();    //needs the exam visible to focus/scroll
+    };
+    setTimeout(function () { steps = 1; done(); }, 60000);
+    return done;
+}
+
 // ============================================================
 // SECTION: numeric helper, document-request/scoring visibility toggles, CMS-file lookup, main exam
 // viewer load (viewMgtExam is the big entry point building the whole exam UI)
@@ -288,13 +313,16 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
 
     c_log(myCID, xcid);
     section("ExamOpts", [
-        //code:so 20240705 12:11pm; Added the print to PDF button
-        "label|style=float:right; color:maroon|class=alink excludePrint|onclick=PopUp('PDF Preview', null, null, true)|Print to PDF",
+        //code:20261026 the right-hand exam options (Print to PDF, Heatmap Report, Exam Zip Options, Snapshots, Workflow)
+        //live in one "Actions" dropdown; Question-by-Question View stays a toggle. See buildExamActions / addExamAction.
+        "label|style=float:right|id=examActionsWrap|class=excludePrint",
         "label|style=float:right; width:10px|",
+        //code:so 20240705 12:11pm; Added the print to PDF button
+        //"label|style=float:right; color:maroon|class=alink excludePrint|onclick=PopUp('PDF Preview', null, null, true)|Print to PDF",
         "label|style=float:right|id=srchGrades",
         //"label|style=float:right; width:10px|",
         //"label|style=float:right; color:maroon|class=alink excludePrint|onclick=showOnlyAttachments()|Attachment View",
-        ((xcid != 0) ? "label|style=float:right; color:maroon|class=alink excludePrint|onclick=generateJSReport()|Heatmap Report" : ""),
+        //((xcid != 0) ? "label|style=float:right; color:maroon|class=alink excludePrint|onclick=generateJSReport()|Heatmap Report" : ""),
         "label|style=float:right|id=sectExamSharing|class=excludePrint",
         "label|style=float:right; width:10px|",
         "label|class=toggle-switch|style=float:right;|id=toggle_switch_id",
@@ -317,6 +345,10 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
 
     ]);
 
+    buildExamActions();
+    addExamAction("Print to PDF", function () { PopUp('PDF Preview', null, null, true); });
+    if (xcid != 0) { addExamAction("Heatmap Report", function () { generateJSReport(); }); }
+
     //section("srchGrades", ["label|class=alink excludePrint|style=color:maroon|onclick=searchGrades()|Needs Attention"]);
 
     var newHt = (document.body.scrollHeight - 320) + "px";
@@ -326,6 +358,10 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
     main.appendChild(dyn("div", "id=availExamsInner|style=width:100%;height:" + newHt + "; overflow-y:scroll"));
     main = document.getElementById("availExamsInner");
     if (MgtSnapshot) { main.classList.add("mgtSnapRO"); }
+
+    //code:20261027 hide the exam until it is fully built: main build + answers + scores + last view
+    main.parentNode.insertBefore(dyn("div", "id=examLoadingMsg|style=padding:20px; font-weight:normal; color:black|innerHTML=Please wait while the exam is loading ..."), main);
+    var examLoaded = mgtExamLoadBegin(4);
 
     var btns = [
         "_MgtGetExam",
@@ -383,16 +419,21 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
          //   ((jsMgtDocs.filter(d => d.FID != null).length > 0) ? "a|icon=zip.png|icon.style=padding-right:5px;|class=excludePrint|style=float:right;color:steelblue|onclick=GetZipFile('" + ExamID + "'," + xcid + ")|Zip Document Requests" : ""),
         ])
         
+        //code:20261026 Exam Zip Options and Snapshots moved into the Actions dropdown (same conditions as before)
+        if (jsMgtDocs.filter(d => d.FID != null).length > 0) { addExamAction("Exam Zip Options", function () { GetZipFile(ExamID, xcid); }); }
+        //code:20261001 exam snapshots (same visibility as the audit buttons)
+        if ([ExamOwnerCID, xcid].indexOf(myCID) > -1) { addExamAction("Snapshots", function () { showExamSnapshots(ExamID, xcid); }); }
         section("ExamOpts", [
-            ((jsMgtDocs.filter(d => d.FID != null).length > 0) ? "label|class=alink excludePrint|style=float:right;color:maroon;|onclick=GetZipFile('" + ExamID + "'," + xcid + ")|Exam Zip Options" : ""),
-            //code:20261001 exam snapshots (same visibility as the audit buttons)
-            (([ExamOwnerCID, xcid].indexOf(myCID) > -1) ? "label|class=alink excludePrint|style=float:right;color:maroon;padding-right:20px|onclick=showExamSnapshots('" + ExamID + "'," + xcid + ")|Snapshots" : ""),
+            //((jsMgtDocs.filter(d => d.FID != null).length > 0) ? "label|class=alink excludePrint|style=float:right;color:maroon;|onclick=GetZipFile('" + ExamID + "'," + xcid + ")|Exam Zip Options" : ""),
+            //(([ExamOwnerCID, xcid].indexOf(myCID) > -1) ? "label|class=alink excludePrint|style=float:right;color:maroon;padding-right:20px|onclick=showExamSnapshots('" + ExamID + "'," + xcid + ")|Snapshots" : ""),
             //((jsMgtDocs.filter(d => d.FID != null).length > 0) ? "label|class=alink excludePrint|style=float:right;color:maroon;|onclick=createExamZipFile('" + ExamID + "'," + xcid + ")|Create Zip File" : ""),
             //((jsMgtDocs.filter(d => d.FID != null).length > 0) ? "label|class=alink excludePrint|style=float:right;color:maroon;|onclick=PopUp('Show Exam Zip Options', [xCID, ExamID, LineID, DocReqID, fromPCorCMS], null, null, ["400px", "900px"])|Exam zip options" : ""),
             // PopUp("Exam Zip Options", [xCID, ExamID, LineID, DocReqID, fromPCorCMS], null, null, ["400px", "900px"]);
             //createExamZipFile('" + ExamID + "'," + xCID + ")|Create Zip File
             //PopUp("Show Exam Zip Options", [xCID, ExamID, LineID, DocReqID, fromPCorCMS], null, null, ["400px", "900px"]);
         ])
+        //code:20261025 exam workflow link (added only if the server says this exam has one and the caller may see it)
+        if (!MgtSnapshot) { loadWorkflowLink(ExamID, xcid); }
 
         //BUILD BANNER AND TABLE
         nsection("availExamsInner", [
@@ -460,18 +501,7 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
                 }
             }
 
-            // Populate the dropdown options
-            var dropdown = document.getElementById("examSectionDropdown");
-            if (dropdown && uniqueModules.length > 0) {
-                // 1. Clear out any previously appended options first
-                dropdown.innerHTML = "";
-
-                uniqueModules.forEach(function (mod) {
-                    xsection(examSectionDropdown, [
-                        "option|value=" + mod.targetId + "|" + mod.name,
-                    ]);
-                });
-            }
+            //section dropdown options are written once after the loop (was cleared and rebuilt for every question)
 
             nsection("tblMain", ["tr|id=question-" + i + "|onmouseover=showQuestionModuleLabel('" + actual_Assessment_Module + "'); // Corrected: Use arrow function|tabindex=0|class=question question_" + strLineID + "|||" + //code 02032025 16:30
                 "td|style=padding-left:30px;background-color:" + bgclr + "|" + jsMgtExam[i]["QuestNum"] + " " + jsMgtExam[i]["Question"].replace(/=/g, "~"),
@@ -778,6 +808,19 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
                 }
             }
         }
+        // Populate the dropdown options
+        var dropdown = document.getElementById("examSectionDropdown");
+        if (dropdown && uniqueModules.length > 0) {
+            // 1. Clear out any previously appended options first
+            dropdown.innerHTML = "";
+
+            uniqueModules.forEach(function (mod) {
+                xsection(examSectionDropdown, [
+                    "option|value=" + mod.targetId + "|" + mod.name,
+                ]);
+            });
+        }
+
         //c_log(ExamID, xcid);
         //code: 20240819: 0400pm Fetch data from the _MGTGetLastView SP
         getData(null, newFormData("_MGTGetLastView", { examid: ExamID, xcid: xcid }), function (vr) {
@@ -799,12 +842,14 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
             if (recommendedRemediation && recommendedRemediation.OnOff === true) { MGTSetLayer(2, ExamID, xcid) };
             if (referenceSource && referenceSource.OnOff === true) { MGTSetLayer(3, ExamID, xcid) };
 
+            examLoaded();
         });
 
-        MGTPopAnswers();
+        MGTPopAnswers(null, null, examLoaded);
         MGTPopDocs();
-        MGTPopScores();
+        MGTPopScores(examLoaded);
 
+        examLoaded();
     });
     //2025 code: 16012025 3:00pm
     setTimeout(() => {
@@ -1683,7 +1728,7 @@ function MGTSetDefaultScores(go, lineid) {
 }
 
 
-function MGTPopScores() {
+function MGTPopScores(onDone) {
     var sc = mgtSnapMap(["_MgtGetExamScores"], [{ examid: MgtExamID, xcid: MgtXCID }]);
     getData(null, newFormData(sc[0][0], sc[1][0]), function (vr) {
         var js = jparse(vr);
@@ -1725,6 +1770,7 @@ function MGTPopScores() {
                 }
             }
         }
+        if (onDone) onDone();
     });
 }
 
@@ -1784,7 +1830,7 @@ function MGTEditAnswer(ea, ix, id, go, strLineID_IX) {
     }
 }
 
-function MGTPopAnswers(passedLineID, passedQNum) {
+function MGTPopAnswers(passedLineID, passedQNum, onDone) {
     var passedfld, passedfldDetails;
     //passedLineID = null;
     ////c_log("xxxmpa", passedLineID, passedQNum);
@@ -1813,6 +1859,14 @@ function MGTPopAnswers(passedLineID, passedQNum) {
 
         ////code:jk-20240904:109pm - replaced with function below, "FocusLastQuestion()"
         //focusLastAnsweredQuestion(jsMgtAnswers, passedQNum);//code: 20240819: 0400pm Invoke the focusLastAnsweredQuestion() Function
+
+        //mgt answer rows grouped by LineID once (was a js[1].filter for every answer x layer)
+        var mgtRowsByLine = new Map(), mgtRows = js[1] || [];
+        for (var r = 0; r < mgtRows.length; r++) {
+            var rLine = mgtRows[r].LineID;
+            if (!mgtRowsByLine.has(rLine)) mgtRowsByLine.set(rLine, []);
+            mgtRowsByLine.get(rLine).push(mgtRows[r]);
+        }
 
         //loop through both member and mgt answers
 
@@ -1884,8 +1938,7 @@ function MGTPopAnswers(passedLineID, passedQNum) {
 
                                 //////c_log("wtf", thisLineID, js[1]);
                                 try {
-                                    ans2 = js[1].filter(d =>
-                                        d.LineID == thisLineID &&
+                                    ans2 = (mgtRowsByLine.get(thisLineID) || []).filter(d =>
                                         d[MGTAuditLayers[ii]["Name"]] != null &&
                                         d[MGTAuditLayers[ii]["Name"]] != ""
                                     )[0][MGTAuditLayers[ii]["Name"]];
@@ -1958,7 +2011,9 @@ function MGTPopAnswers(passedLineID, passedQNum) {
         }
 
         //code:jk-20240904:109pm - function to set init focus
-        FocusLastQuestion();
+        //code:20261027 on the initial exam load the reveal step does the focus once the exam is visible
+        if (onDone) onDone();
+        else FocusLastQuestion();
     });
 }
 
@@ -2052,6 +2107,9 @@ function MGTAnswerOnchange(LineID, QNum, CB, runConfirm) {
                 MGTPopAnswers(LineID, QNum);
                 if (runConfirm)
                     fld.style.display = "";
+
+                //code:20261025 exam workflow: a remediation unchecked within an hour of being set -> offer to drop its action
+                if (CB != null && answer == "" && QNum > 0) { mgtWorkflowCheckRemoval(LineID, QNum); }
 
                 //SendEmailAlert('Exams', MgtExamID, MgtXCID);
             });
@@ -3172,7 +3230,7 @@ var MgtSnapReads = {
 };
 
 // exam writes refused by getData while a snapshot is open - they would otherwise write to the LIVE exam
-var MgtSnapBlockedWrites = /^_(MgtUpdateAnswers?|MgtArchiveAnswer|MgtUpdateLMC|MgtUpdateForm|MgtDeleteFormDoc|MGTExamAttachCMSDoc|MGTExamUploadDoc|SetExamDefaultScores)$/;
+var MgtSnapBlockedWrites = /^_(MgtUpdateAnswers?|MgtArchiveAnswer|MgtUpdateLMC|MgtUpdateForm|MgtDeleteFormDoc|MGTExamAttachCMSDoc|MGTExamUploadDoc|SetExamDefaultScores|MgtWorkflowRemoveAction)$/;
 
 // [actions[], params[]] -> the snapshot equivalents when a snapshot is open.
 // snapshotid goes FIRST: the adHoc dispatcher binds params positionally in key order (exec NEO_x @uid, @snapshotid, ...)
@@ -3322,4 +3380,587 @@ function getExamAndHeatmapHTML(includePDF, includeHeatmap, callback) {
         console.log("Final (no heatmap): examHTML length=", examHTML.length, "heatmapHTML length=", heatmapHTML.length);
         callback(examHTML, heatmapHTML);
     }
+}
+
+//code:20261026 EXAM "ACTIONS" DROPDOWN - the right-hand exam options in one select (built in viewMgtExam).
+// Each entry is a label + function; entries can arrive late (Workflow waits on the server) and are kept unique by label.
+var MgtExamActions = [];
+
+function buildExamActions() {
+    MgtExamActions = [];
+    var wrap = document.getElementById("examActionsWrap");
+    if (!wrap) { return; }
+    wrap.innerHTML = "";
+
+    var sel = document.createElement("select");
+    sel.id = "examActions";
+    sel.style.cssText = "padding:5px;font-weight:bold;color:maroon;cursor:pointer";
+    var ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = "Actions";
+    sel.appendChild(ph);
+    sel.onchange = function () {
+        var a = MgtExamActions[sel.value];
+        sel.value = "";
+        if (a) { a.fn(); }
+    };
+    wrap.appendChild(sel);
+}
+
+function addExamAction(label, fn) {
+    var sel = document.getElementById("examActions");
+    if (!sel || MgtExamActions.some(a => a.label == label)) { return; }
+    MgtExamActions.push({ label: label, fn: fn });
+    var opt = document.createElement("option");
+    opt.value = MgtExamActions.length - 1;
+    opt.textContent = label;
+    sel.appendChild(opt);
+}
+
+//code:20261025 EXAM WORKFLOW - remediation tracking (SharedSQLWithClaude/FEATURE_ExamWorkflow, spec markdowns/CMSNeo_Workflow_Spec.md)
+// The exam write procs log to the workflow themselves (003_ExamWorkflow_hooks.sql); this page only reads it,
+// shows the link, asks the one-hour question, and makes the PDF report. Every call is re-checked server-side
+// (CID 1518 network + AccessTreeDown / own company).
+var MgtWorkflowSendUrl = "../main/SendWorkflowPdf"; // CMSMailbox's exam viewer overrides these two
+var MgtWorkflowPdfUrl = "../main/WorkflowPdf";
+var MgtWorkflowCanManage = false;
+
+var MgtWorkflowEventNames = {
+    remediation_set: "Remediation set",
+    remediation_edited: "Remediation edited",
+    remediation_removed: "Remediation removed (complete)",
+    action_removed: "Removed from workflow",
+    answer_added: "Answer added",
+    answer_edited: "Answer edited",
+    answer_archived: "Answer archived",
+    doc_uploaded: "Document uploaded",
+    doc_attached: "Document attached",
+    doc_deleted: "Document deleted"
+};
+
+function mgtWorkflowDT(dt) {
+    return (dt == null || dt == "") ? "time not recorded" : convertDT(dt);
+}
+
+// "Workflow" entry in the exam's Actions dropdown. The status call also back-fills an exam begun before this feature.
+function loadWorkflowLink(ExamID, xcid) {
+    getData(null, newFormData("_MgtGetWorkflowStatus", { examid: ExamID, xcid: xcid }), function (vr) {
+        var js = jparse(vr);
+        if (js.length == 0 || js[0].err || !js[0].HasWorkflow) { return; }
+        MgtWorkflowCanManage = js[0].CanManage;
+        addExamAction("Workflow", function () { showExamWorkflow(ExamID, xcid); });
+    });
+}
+
+// The workflow report opens in its own browser tab (John, 2026-10-26). The tab is a blank same-origin page that
+// this exam page writes into and keeps driving: every server call still goes through this page's getData/fetch
+// with its live token, so the tab needs no login or token of its own. wfDoc is the tab's document.
+var wfWin = null;
+var wfDoc = document;
+
+function showExamWorkflow(ExamID, xCID) {
+    var w = window.open("", "cmsExamWorkflow_" + ExamID + "_" + xCID);
+    if (!w) {
+        xconfirm("Your browser blocked the Workflow tab. Allow pop-ups for this site, then choose Workflow again.");
+        return;
+    }
+    // only one tab is driven at a time: an earlier tab for another exam is told it's disconnected
+    if (wfWin && wfWin !== w && !wfWin.closed) { mgtWorkflowDetach(wfWin.document); }
+    if (!MgtWorkflowUnloadHooked) {
+        MgtWorkflowUnloadHooked = true;
+        window.addEventListener("pagehide", function () {
+            try { if (wfWin && !wfWin.closed) { mgtWorkflowDetach(wfWin.document); } } catch (ex) { }
+        });
+    }
+    wfWin = w;
+    wfDoc = w.document;
+
+    var exam = (jsMgtExam && jsMgtExam[0]) ? jsMgtExam[0] : {};
+    wfDoc.open();
+    wfDoc.write("<!doctype html><html><head><meta charset='utf-8'><title>Workflow</title><style>" +
+        "html,body{height:100%;margin:0}" +
+        "body{font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222;display:flex;flex-direction:column;background:#fff}" +
+        "#wfHead{padding:12px 16px 4px 16px;flex:none;border-bottom:solid 1px #ddd}" +
+        "#wfHead .t{font-size:18px;font-weight:bold;margin-bottom:4px}" +
+        "#wfHead span{margin-right:36px}" +
+        ".longblueButton{background-color:steelblue;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:13px;cursor:pointer}" +
+        ".longblueButton:disabled{opacity:.6;cursor:default}" +
+        "</style></head><body>" +
+        "<div id='wfHead'><div class='t'>Exam Workflow</div><div id='wfHeadInfo'></div></div>" +
+        "<div id='wfToolbar' style='padding:8px 16px;flex:none'></div>" +
+        "<div id='wfSend' style='padding:6px 16px;display:none;flex:none'></div>" +
+        "<div id='wfError' style='color:red;font-size:12px;margin:6px 16px;display:none;flex:none'></div>" +
+        "<div id='wfMsg' style='color:#1d6b33;font-size:12px;margin:6px 16px;display:none;flex:none'></div>" +
+        "<div id='wfSummary' style='padding:2px 16px 6px 16px;color:#555;flex:none'></div>" +
+        "<div id='wfList' style='padding:6px 16px 16px 16px;flex:1;min-height:0;overflow-y:auto'></div>" +
+        "</body></html>");
+    wfDoc.close();
+    wfDoc.title = "Workflow - " + (MgtExamName || "Exam") + " - " + (MgtXCompany || "");
+
+    // header: Exam / Managed By / Assigned to, as on the PDF (textContent: names are user-entered)
+    var info = wfDoc.getElementById("wfHeadInfo");
+    [["Exam: ", MgtExamName], ["Managed By: ", exam.ManagingCompany], ["Assigned to: ", MgtXCompany]].forEach(function (p) {
+        var sp = wfDoc.createElement("span");
+        sp.appendChild(wfDoc.createTextNode(p[0]));
+        var b = wfDoc.createElement("b");
+        b.textContent = p[1] || "";
+        sp.appendChild(b);
+        info.appendChild(sp);
+    });
+
+    MgtWorkflowOpen = []; // a freshly opened tab starts with every action's details hidden
+    ExamWorkflow(ExamID, xCID);
+    w.focus();
+}
+
+var MgtWorkflowUnloadHooked = false;
+
+// the exam page that drives this tab is gone (or now drives another tab): say so and disable the controls
+function mgtWorkflowDetach(doc) {
+    try {
+        Array.from(doc.querySelectorAll("button,select,textarea,input")).forEach(e => e.disabled = true);
+        if (doc.getElementById("wfDetached")) { return; }
+        var d = doc.createElement("div");
+        d.id = "wfDetached";
+        d.style.cssText = "margin:8px 16px;padding:6px 12px;background-color:#fff4d6;border:solid 1px #e0b84c;border-radius:4px;flex:none";
+        d.textContent = "This Workflow tab is no longer connected to its exam. Reopen it from the exam's Actions menu to refresh or send it.";
+        var head = doc.getElementById("wfHead");
+        if (head) { head.parentNode.insertBefore(d, head.nextSibling); }
+    } catch (ex) { }
+}
+
+function ExamWorkflow(ExamID, xCID) {
+    var bar = wfDoc.getElementById("wfToolbar");
+    bar.style.cssText += ";display:flex;align-items:center;gap:12px";
+
+    var fl = wfDoc.createElement("label");
+    fl.style.fontSize = "13px";
+    fl.textContent = "Show: ";
+    var sel = wfDoc.createElement("select");
+    sel.id = "wfFilter";
+    sel.style.cssText = "padding:4px;font-size:13px";
+    [["all", "Everything"], ["pending", "Pending only"]].forEach(function (o) {
+        var opt = wfDoc.createElement("option");
+        opt.value = o[0];
+        opt.textContent = o[1];
+        sel.appendChild(opt);
+    });
+    try { sel.value = localStorage.getItem("mgtWorkflowFilter") || "all"; } catch (ex) { }
+    sel.onchange = function () {
+        try { localStorage.setItem("mgtWorkflowFilter", sel.value); } catch (ex) { }
+        renderExamWorkflow();
+    };
+    fl.appendChild(sel);
+    bar.appendChild(fl);
+
+    // the PDF is the displayed report: same rows, same Show filter (built server-side, landscape)
+    var dl = wfDoc.createElement("button");
+    dl.className = "longblueButton";
+    dl.textContent = "Download PDF";
+    dl.onclick = function () { mgtWorkflowDownloadPdf(ExamID, xCID, dl); };
+    bar.appendChild(dl);
+
+    var btn = wfDoc.createElement("button");
+    btn.className = "longblueButton";
+    btn.textContent = "Send PDF via Secure Email";
+    btn.onclick = function () { mgtWorkflowShowSend(ExamID, xCID); };
+    bar.appendChild(btn);
+
+    // the tab doesn't see later changes made on the exam page by itself
+    var rf = wfDoc.createElement("button");
+    rf.className = "longblueButton";
+    rf.textContent = "Refresh";
+    rf.onclick = function () { loadExamWorkflow(ExamID, xCID); };
+    bar.appendChild(rf);
+
+    loadExamWorkflow(ExamID, xCID);
+}
+
+var MgtWorkflowRows = []; // last _MgtGetWorkflowLines result; the Show filter re-renders from it
+var MgtWorkflowOpen = []; // LineIDs whose details are expanded (kept across filter changes and Refresh)
+
+function loadExamWorkflow(ExamID, xCID) {
+    getData(null, newFormData("_MgtGetWorkflowLines", { examid: ExamID, xcid: xCID }), function (vr) {
+        var js = jparse(vr);
+        if (!wfWin || wfWin.closed) { return; } //tab closed
+        var block = wfDoc.getElementById("wfList");
+        if (!block) { return; }
+        block.innerHTML = "";
+        mgtWorkflowError("");
+
+        if (js.length > 0 && js[0].err) {
+            mgtWorkflowError("Unable to load the workflow.");
+            return;
+        }
+        MgtWorkflowRows = js.filter(d => d.LineID);
+        renderExamWorkflow();
+    });
+}
+
+// _MgtGetWorkflowLines rows (in exam order) -> one entry per question, with its remediations (in the
+// order they were set) and the combined timeline. Shared by the tab; the PDF groups the same way server-side.
+function mgtWorkflowGroupByLine(js) {
+    var lines = [];
+    js.forEach(function (r) {
+        var ln = lines.find(l => l.LineID == r.LineID);
+        if (!ln) {
+            ln = { LineID: r.LineID, Module: r.Module, ModNum: r.ModNum, QuestNum: r.QuestNum, Question: r.Question, rems: [], events: [] };
+            lines.push(ln);
+        }
+        ln.events.push(r);
+        if (r.ActionID && !ln.rems.find(a => a.ActionID == r.ActionID)) {
+            ln.rems.push({ ActionID: r.ActionID, RemediationText: r.RemediationText, Status: r.Status, DTSet: r.DTSet,
+                SetByName: r.SetByName, DTCompleted: r.DTCompleted, CompletedByName: r.CompletedByName, CompletedTimeKnown: r.CompletedTimeKnown });
+        }
+    });
+    lines.forEach(function (ln) {
+        ln.rems.sort((a, b) => (a.DTSet < b.DTSet) ? -1 : (a.DTSet > b.DTSet) ? 1 : a.ActionID - b.ActionID);
+        ln.pending = ln.rems.filter(a => a.Status == "Pending").length;
+    });
+    return lines;
+}
+
+function renderExamWorkflow() {
+    var block = wfDoc.getElementById("wfList");
+    if (!block) { return; }
+    block.innerHTML = "";
+    var sum = wfDoc.getElementById("wfSummary");
+    sum.textContent = "";
+
+    var lines = mgtWorkflowGroupByLine(MgtWorkflowRows);
+    if (lines.length == 0) {
+        mgtWorkflowNote(block, "No workflow actions for this exam and company.");
+        return;
+    }
+
+    // status is by question: Pending until every remediation set on it has been removed (John, 2026-10-27)
+    var remCount = lines.reduce((n, l) => n + l.rems.length, 0);
+    var linesPending = lines.filter(l => l.pending > 0).length;
+    sum.textContent = lines.length + " question(s): " + linesPending + " pending, " + (lines.length - linesPending) + " complete" +
+        "  ·  " + remCount + " remediation(s)";
+
+    var filter = wfDoc.getElementById("wfFilter");
+    if (filter && filter.value == "pending") {
+        lines = lines.filter(l => l.pending > 0);
+        if (lines.length == 0) {
+            mgtWorkflowNote(block, "No pending actions.");
+            return;
+        }
+    }
+
+    // one card per question (exam order); DOM/textContent because answers and remediation text are user-entered
+    lines.forEach(function (ln) {
+        var id = ln.LineID;
+        var card = wfDoc.createElement("div");
+        card.style.cssText = "border:solid 1px #ddd;border-radius:4px;margin-bottom:10px;padding:8px 10px;font-size:13px";
+
+        var hd = wfDoc.createElement("div");
+        hd.style.cssText = "display:flex;justify-content:space-between;gap:10px";
+        var ttl = wfDoc.createElement("div");
+        ttl.style.fontWeight = "bold";
+        ttl.textContent = (ln.ModNum || "") + "." + (ln.QuestNum || "") + " " + (ln.Module || "");
+        hd.appendChild(ttl);
+        hd.appendChild(mgtWorkflowBadge((ln.pending > 0) ? "Pending" : "Complete"));
+        card.appendChild(hd);
+
+        if (ln.Question) {
+            var q = wfDoc.createElement("div");
+            q.style.cssText = "color:#555;margin:3px 0";
+            q.textContent = ln.Question;
+            card.appendChild(q);
+        }
+
+        // each distinct remediation on the question once, with when it was set / removed (the status is the
+        // question's, above). One set and removed several times is one row; every cycle is in the timeline.
+        var groups = mgtWorkflowRemGroups(ln.rems);
+        var lbl = wfDoc.createElement("div");
+        lbl.style.cssText = "margin:6px 0 2px 0;font-weight:bold";
+        lbl.textContent = (groups.length == 1) ? "Remediation:" : "Remediations (" + groups.length + "):";
+        card.appendChild(lbl);
+        var list = wfDoc.createElement("table");
+        list.style.cssText = "width:100%;border-collapse:collapse";
+        mgtWorkflowFixedCols(list, MgtWorkflowRemCols);
+        groups.forEach(function (g) {
+            var tr = list.insertRow();
+            var tdTxt = tr.insertCell();
+            tdTxt.textContent = g.text;
+            tdTxt.style.cssText = "padding:2px 6px 2px 12px;vertical-align:top";
+            var tdWhen = tr.insertCell();
+            tdWhen.textContent = mgtWorkflowRemHistory(g.rems);
+            tdWhen.style.cssText = "padding:2px 6px;color:#555;vertical-align:top;font-size:12px";
+        });
+        card.appendChild(list);
+
+        // the combined timeline is hidden until the "Show details" line is clicked (arrow on the far right)
+        var open = MgtWorkflowOpen.indexOf(id) > -1;
+        var tog = wfDoc.createElement("div");
+        tog.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-top:6px;padding:4px 6px;" +
+            "border-top:solid 1px #eee;color:steelblue;cursor:pointer;user-select:none";
+        var togTxt = wfDoc.createElement("span");
+        var togArrow = wfDoc.createElement("span");
+        togArrow.style.cssText = "font-size:12px;padding-left:10px";
+        tog.appendChild(togTxt);
+        tog.appendChild(togArrow);
+        card.appendChild(tog);
+
+        var tbl = wfDoc.createElement("table");
+        tbl.style.cssText = "width:100%;border-collapse:collapse;margin-top:2px";
+        mgtWorkflowFixedCols(tbl, MgtWorkflowEventCols);
+
+        function setOpen(o) {
+            open = o;
+            tbl.style.display = (open) ? "" : "none";
+            togTxt.textContent = ((open) ? "Hide details" : "Show details") + " (" + ln.events.length + ")";
+            togArrow.textContent = (open) ? "▲" : "▼";
+            MgtWorkflowOpen = MgtWorkflowOpen.filter(x => x != id);
+            if (open) { MgtWorkflowOpen.push(id); }
+        }
+        tog.onclick = function () { setOpen(!open); };
+        setOpen(open);
+
+        ln.events.forEach(function (e) {
+            var tr = tbl.insertRow();
+            var by = (e.ActorName || "") + ((e.ActorCompany) ? " (" + e.ActorCompany + ")" : "");
+            [mgtWorkflowDT(e.DTEvent), MgtWorkflowEventNames[e.EventType] || e.EventType, by, mgtWorkflowDetail(e)].forEach(function (v, i) {
+                var td = tr.insertCell();
+                td.textContent = v;
+                td.style.cssText = "padding:3px 6px;border-top:solid 1px #eee;vertical-align:top" +
+                    ((i == 3) ? ";color:#555" : "");
+            });
+        });
+        card.appendChild(tbl);
+        block.appendChild(card);
+    });
+}
+
+// Every question's tables use the same fixed column widths, so the columns line up from one section to
+// the next (auto layout sized each table to its own content). The remediation list's "Set ... removed ..."
+// column starts where the timeline's Detail column does. The PDF uses the same widths.
+var MgtWorkflowEventCols = ["12%", "18%", "25%", "45%"]; // When, Event, By, Detail
+var MgtWorkflowRemCols = ["55%", "45%"];                 // remediation, set/removed history
+
+function mgtWorkflowFixedCols(table, widths) {
+    table.style.tableLayout = "fixed";
+    table.style.wordWrap = "break-word";
+    var cg = wfDoc.createElement("colgroup");
+    widths.forEach(function (w) {
+        var c = wfDoc.createElement("col");
+        c.style.width = w;
+        cg.appendChild(c);
+    });
+    table.insertBefore(cg, table.firstChild);
+}
+
+// a question's remediations (sorted by DTSet) grouped by their text, in the order each was first set
+function mgtWorkflowRemGroups(rems) {
+    var groups = [];
+    rems.forEach(function (a) {
+        var key = (a.RemediationText || "").trim().toLowerCase();
+        var g = groups.find(x => x.key == key);
+        if (!g) { g = { key: key, text: a.RemediationText || "", rems: [] }; groups.push(g); }
+        g.rems.push(a);
+    });
+    return groups;
+}
+
+// "Set ... by ...; removed ... by ..." for one remediation; for one set more than once:
+// "Set 5 times, first ..., last ... by ...; last removed ... by ..." (or "; still set")
+// (the PDF builder mirrors this)
+function mgtWorkflowRemHistory(rems) {
+    var last = rems[rems.length - 1];
+    var removed = (last.Status == "Complete")
+        ? "removed " + ((last.CompletedTimeKnown) ? mgtWorkflowDT(last.DTCompleted) : "(time not recorded)") +
+          ((last.CompletedByName) ? " by " + last.CompletedByName : "")
+        : "";
+    if (rems.length == 1) {
+        return "Set " + mgtWorkflowDT(last.DTSet) + ((last.SetByName) ? " by " + last.SetByName : "") + ((removed) ? "; " + removed : "");
+    }
+    return "Set " + rems.length + " times, first " + mgtWorkflowDT(rems[0].DTSet) + ", last " + mgtWorkflowDT(last.DTSet) +
+        ((last.SetByName) ? " by " + last.SetByName : "") + ((removed) ? "; last " + removed : "; still set");
+}
+
+// what an event row says in the Detail column (the PDF builder mirrors this)
+function mgtWorkflowDetail(e) {
+    var detail = (e.NewText || e.OldText || "");
+    if (e.EventType == "answer_edited" && e.OldText) { detail = e.OldText + "  →  " + (e.NewText || ""); }
+    // with several remediations on one question, the remediation rows name which one
+    if (e.EventType == "remediation_set" || e.EventType == "remediation_removed") { detail = e.RemediationText || ""; }
+    if (e.Note) { detail = (detail ? detail + " " : "") + "[" + e.Note + "]"; }
+    return detail;
+}
+
+function mgtWorkflowBadge(status, text) {
+    var b = wfDoc.createElement("span");
+    b.textContent = text || status;
+    b.style.cssText = "padding:1px 8px;border-radius:10px;font-size:12px;white-space:nowrap;" +
+        ((status == "Pending") ? "background-color:#fff4d6;color:#8a6100" : "background-color:#dff3e3;color:#1d6b33");
+    return b;
+}
+
+function mgtWorkflowError(msg) {
+    var e = wfDoc.getElementById("wfError");
+    if (!e) { return; }
+    e.textContent = msg;
+    e.style.display = (msg) ? "block" : "none";
+    if (msg) { mgtWorkflowMsg(""); }
+}
+
+// confirmation line in the tab (the exam page's smconfirm would show on the other tab)
+function mgtWorkflowMsg(msg) {
+    var e = wfDoc.getElementById("wfMsg");
+    if (!e) { return; }
+    e.textContent = msg;
+    e.style.display = (msg) ? "block" : "none";
+    if (msg) { setTimeout(function () { if (e.textContent == msg) { e.style.display = "none"; } }, 4000); }
+}
+
+function mgtWorkflowNote(block, msg) {
+    var d = wfDoc.createElement("div");
+    d.style.cssText = "color:#888;font-size:13px";
+    d.textContent = msg;
+    block.appendChild(d);
+}
+
+// ---- one-hour rule: after unchecking a remediation, offer to drop the matching workflow action ----
+function mgtWorkflowCheckRemoval(LineID, QNum) {
+    getData(null, newFormData("_MgtGetWorkflowRecentRemoval", { examid: MgtExamID, xcid: MgtXCID, lineid: LineID, qnum: QNum }), function (vr) {
+        var js = jparse(vr);
+        if (js.length == 0 || js[0].err || !js[0].ActionID) { return; }
+
+        xconfirm("This remediation was added less than an hour ago. Remove the corresponding action from the Workflow?",
+            null, "mgtWorkflowRemoveAction(" + (js[0].ActionID * 1) + ")");
+        // "No" (or closing) keeps the action, already marked complete
+        try {
+            xconfirmCancel.innerHTML = "No, keep it";
+            xconfirmContinue.innerHTML = "Yes, remove";
+        } catch (ex) { }
+    });
+}
+
+function mgtWorkflowRemoveAction(actionID) {
+    xconfirm();
+    getData(null, newFormData("_MgtWorkflowRemoveAction", { actionid: actionID }), function (vr) {
+        var js = jparse(vr);
+        if (js.length == 0 || js[0].status != "ok") {
+            xconfirm("The workflow action could not be removed" + ((js.length > 0 && js[0].status == "not_allowed") ? " (more than an hour old, or not permitted)." : "."));
+        }
+    });
+}
+
+function mgtWorkflowPendingOnly() {
+    var f = wfDoc.getElementById("wfFilter");
+    return !!(f && f.value == "pending");
+}
+
+// ---- PDF report: download (MailboxShareController.WorkflowPdf) ----
+function mgtWorkflowDownloadPdf(ExamID, xCID, btn) {
+    mgtWorkflowError("");
+    btn.disabled = true;
+    var fd = new FormData();
+    fd.append("strjson", JSON.stringify({ examId: ExamID, xcid: xCID, pendingOnly: mgtWorkflowPendingOnly() }));
+    fetch(MgtWorkflowPdfUrl, { method: "POST", headers: { "Authorization": "Bearer " + UserToken }, body: fd })
+        .then(function (r) {
+            if (!r.ok) throw new Error("WorkflowPdf " + r.status);
+            var cd = r.headers.get("Content-Disposition") || "";
+            var m = /filename\*=UTF-8''([^;]+)/i.exec(cd) || /filename="?([^";]+)"?/i.exec(cd);
+            return r.blob().then(function (b) { return { blob: b, name: (m) ? decodeURIComponent(m[1]) : "Workflow.pdf" }; });
+        })
+        .then(function (f) {
+            btn.disabled = false;
+            var url = URL.createObjectURL(f.blob);
+            var a = wfDoc.createElement("a");
+            a.href = url;
+            a.download = f.name;
+            wfDoc.body.appendChild(a);
+            a.click();
+            wfDoc.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+        })
+        .catch(function (ex) {
+            btn.disabled = false;
+            mgtWorkflowError("The PDF could not be created - see console.");
+            console.log("WorkflowPdf failed", ex);
+        });
+}
+
+// ---- PDF report via secure email (MailboxShareController.SendWorkflowPdf -> CMSMailbox message + attachment) ----
+function mgtWorkflowShowSend(ExamID, xCID) {
+    var box = wfDoc.getElementById("wfSend");
+    mgtWorkflowError("");
+    box.style.display = "";
+    box.innerHTML = "<div style='color:#777;font-size:13px'>Loading recipients...</div>";
+
+    getData(null, newFormData("_MgtGetWorkflowRecipients", { examid: ExamID, xcid: xCID }), function (vr) {
+        var js = jparse(vr);
+        box.innerHTML = "";
+        if (js.length > 0 && js[0].err) { mgtWorkflowError("Unable to load recipients."); return; }
+        js = js.filter(d => d.UID);
+
+        var lbl = wfDoc.createElement("div");
+        lbl.style.cssText = "font-weight:bold;font-size:13px;margin-bottom:4px";
+        lbl.textContent = "Send the Workflow PDF (" + (mgtWorkflowPendingOnly() ? "pending only" : "everything") + ") to:";
+        box.appendChild(lbl);
+
+        if (js.length == 0) {
+            var none = wfDoc.createElement("div");
+            none.style.cssText = "color:#888;font-size:13px";
+            none.textContent = "No one who works this exam can receive secure email.";
+            box.appendChild(none);
+            return;
+        }
+
+        var list = wfDoc.createElement("div");
+        list.style.cssText = "max-height:160px;overflow-y:auto;font-size:13px;border:solid 1px #eee;padding:4px";
+        js.forEach(function (r) {
+            var row = wfDoc.createElement("label");
+            row.style.cssText = "display:block;padding:2px 0;cursor:pointer";
+            var cb = wfDoc.createElement("input");
+            cb.type = "checkbox";
+            cb.value = r.UID;
+            cb.className = "wfRecipient";
+            row.appendChild(cb);
+            row.appendChild(wfDoc.createTextNode(" " + r.Name + " (" + (r.Company || "") + ")" + ((r.Side == "target") ? "" : " - management")));
+            list.appendChild(row);
+        });
+        box.appendChild(list);
+
+        var note = wfDoc.createElement("textarea");
+        note.id = "wfSendNote";
+        note.placeholder = "Message (optional)";
+        note.style.cssText = "width:100%;height:50px;margin-top:6px;font-size:13px";
+        box.appendChild(note);
+
+        var send = wfDoc.createElement("button");
+        send.className = "longblueButton";
+        send.textContent = "Send";
+        send.onclick = function () { mgtWorkflowSend(ExamID, xCID, send); };
+        box.appendChild(send);
+    });
+}
+
+function mgtWorkflowSend(ExamID, xCID, btn) {
+    var uids = Array.from(wfDoc.getElementsByClassName("wfRecipient")).filter(c => c.checked).map(c => c.value * 1);
+    if (uids.length == 0) { mgtWorkflowError("Pick at least one recipient."); return; }
+    mgtWorkflowError("");
+    btn.disabled = true;
+
+    var fd = new FormData();
+    fd.append("strjson", JSON.stringify({ examId: ExamID, xcid: xCID, recipients: uids, body: wfDoc.getElementById("wfSendNote").value, pendingOnly: mgtWorkflowPendingOnly() }));
+    fetch(MgtWorkflowSendUrl, { method: "POST", headers: { "Authorization": "Bearer " + UserToken }, body: fd })
+        .then(function (r) { return r.text(); })
+        .then(function (vr) {
+            btn.disabled = false;
+            var res = jparse(vr);
+            if (res.status == "ok") {
+                wfDoc.getElementById("wfSend").style.display = "none";
+                mgtWorkflowMsg("Workflow PDF sent by secure email.");
+            } else {
+                mgtWorkflowError("The PDF was not sent (" + (res.status || "error") + ").");
+            }
+        })
+        .catch(function (ex) {
+            btn.disabled = false;
+            mgtWorkflowError("The PDF was not sent - see console.");
+            console.log("SendWorkflowPdf failed", ex);
+        });
 }
