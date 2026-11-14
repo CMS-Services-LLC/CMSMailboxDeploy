@@ -22,6 +22,9 @@ var jsExamCMSFiles = [], selectedCMSFiles = [], MGTUploadDocs_Params = [];
 var tmpCMSFiles = [];
 var isShowHideDocRequestsActive = false;//code:so 20240705 12:11pm;added the isShowHideDocRequestsActive variable to manage state
 var curExamDocs = [];
+//code:20261103 private (management-only) exam documents - SharedSQLWithClaude/FEATURE_ExamPrivateDocs
+var MgtPrivateDocsEnabled = true; // CMSMailbox's exam viewer sets this false (no Management only box there)
+var MgtDocsMgtView = false;       // caller passes dbo.ftnExamMgtView (NEO_MgtGetExamDocs.MgtView)
 
 let isDocumentActive = false;
 let isRequestActive = false;
@@ -53,6 +56,7 @@ function mgtExamLoadBegin(steps) {
             var el = document.getElementById(d);
             if (el) el.style.display = "";
         });
+        mgtExamFitHeight();     //code:20261113 needs the exam visible to measure
         FocusLastQuestion();    //needs the exam visible to focus/scroll
     };
     setTimeout(function () { steps = 1; done(); }, 60000);
@@ -359,6 +363,9 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
     main = document.getElementById("availExamsInner");
     if (MgtSnapshot) { main.classList.add("mgtSnapRO"); }
 
+    //code:20261110 Release Status bar: above the scrolling exam, so it stays in view wherever the exam is scrolled
+    if (!MgtSnapshot) { main.parentNode.insertBefore(dyn("div", "id=mgtReleaseBar|class=excludePrint|style=display:none"), main); }
+
     //code:20261027 hide the exam until it is fully built: main build + answers + scores + last view
     main.parentNode.insertBefore(dyn("div", "id=examLoadingMsg|style=padding:20px; font-weight:normal; color:black|innerHTML=Please wait while the exam is loading ..."), main);
     var examLoaded = mgtExamLoadBegin(4);
@@ -434,6 +441,7 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
         ])
         //code:20261025 exam workflow link (added only if the server says this exam has one and the caller may see it)
         if (!MgtSnapshot) { loadWorkflowLink(ExamID, xcid); }
+        if (!MgtSnapshot) { mgtRefreshPending(); } //code:20261110 Release Status
 
         //BUILD BANNER AND TABLE
         nsection("availExamsInner", [
@@ -893,13 +901,11 @@ function handleToggleChange(event) {
     const mainContent = document.getElementById('availExamsInner');
 
     if (isQuestionByQuestionMode) {
-        availExamsInner.style.height = ((availExamsInner.style.height.replace("px", "") * 1) - 100) + "px";
         mainContent.classList.add('question-by-question-mode');
         showQuestionAtIndex(currentQuestionIndex);
         questionTitleSectionState = true;//code 02032025 16:30
 
     } else {
-        availExamsInner.style.height = ((availExamsInner.style.height.replace("px", "") * 1) + 100) + "px";
         mainContent.classList.remove('question-by-question-mode');
         showAllQuestions();
         questionTitleSectionState = false;//code 02032025 16:30
@@ -909,7 +915,29 @@ function handleToggleChange(event) {
         }
     }
     showPreviewQuestions();//code: 01242025 1:00pm
+    mgtExamFitHeight(); //code:20261113 was a fixed -100px / +100px per toggle, so the exam drifted off the window's bottom edge
 }
+
+//code:20261113 John: the exam didn't fill the window exactly, especially after toggling Question-by-Question view.
+//#availExamsInner got a fixed height once (body height - 320) and the toggle then took off / added back 100px, while the
+//Prev/Next buttons, the Release bar and the window size (Exams has its own resizable window) were never measured.
+//Now it takes exactly the space left below it in the window: after the exam is shown, on the toggle, when the
+//Release bar shows or hides, and on resize. Only for an open exam (ExamOpts present), not the exams list.
+function mgtExamFitHeight() {
+    var el = document.getElementById("availExamsInner");
+    if (el == null || el.offsetParent == null || document.getElementById("ExamOpts") == null) return;
+    var minHt = 200;
+    var ht = Math.max(minHt, Math.floor(window.innerHeight - el.getBoundingClientRect().top - 10));
+    el.style.height = ht + "px";
+    //anything under the exam (page padding, footer) would still make the page scroll; take a small overflow back off
+    var over = document.documentElement.scrollHeight - window.innerHeight;
+    if (over > 0 && over <= 80 && ht - over >= minHt) el.style.height = (ht - over) + "px";
+}
+var mgtExamFitTimer = null;
+window.addEventListener("resize", function () {
+    clearTimeout(mgtExamFitTimer);
+    mgtExamFitTimer = setTimeout(mgtExamFitHeight, 100);
+});
 function showQuestionModuleLabel(Assessment_Module) {//code 02032025 16:30
     //alert(Assessment_Module);
     let examSectionHeader = document.getElementById("examSectionHeader");
@@ -1350,6 +1378,12 @@ function MGTPopDocs() {
     var docreqs = [];
     curExamDocs = [];
 
+    //code:20261103 the server decides (MgtView on every row); an exam with no document requests and no
+    //documents returns no rows, so fall back to the rule that shows the Likelihood / Remediation layers
+    MgtDocsMgtView = MgtPrivateDocsEnabled && !MgtSnapshot && ((js.length > 0)
+        ? js.some(d => d.MgtView == 1)
+        : (jsMgtExam.length > 0 && (isDownstream(MgtXCID) || (myCID == jsMgtExam[0].OwnerCID && MgtXCID != 0))));
+
     for (var i = 0; i < js.length; i++) {
         var strLineID = js[i].LineID.replace(/-/g, "");
         var strDocReqID = js[i].DocReqID.replace(/-/g, "");
@@ -1384,37 +1418,216 @@ function MGTPopDocs() {
 
                     //////c_log("docs", dr.Filename);
 
+                    //code:20261103 DocFID is the a_aMGTExamDocs row (FID is the linked CMS file's FID for a cached CMS attachment)
+                    var docFIDRow = (dr.DocFID != null) ? dr.DocFID : dr.FID;
+
                     xsection(subsect, [
                         "div|id=docReq_" + dr.FID +
-                        "|||label|class=redlink|onclick=delExamDoc(" + dr.FID + ")|x" +
+                        "|||label|class=redlink|onclick=delExamDoc(" + dr.FID + ",false," + docFIDRow + ")|x" +
                         "|||label|style=width:10px" +
-                        "|||label|icon=" + icon + "|class=cursor|onclick=" + onclick + "|" + dr.Filename,
+                        "|||label|icon=" + icon + "|class=cursor|onclick=" + onclick + "|" + dr.Filename +
+                        mgtRelLbl(dr), //code:20261104 John: no Make private on document request rows (management documents keep it)
                         "div|id=docReq2_" + dr.FID + "|style=font-weight:bold; padding:left:10px; padding:5px|Loaded By: " + dr.LoadedByName + " with " + dr.LoadedByCompany + " on " + convertDT(dr.DTCreated),
                     ]);
+                    mgtDocDescShow(subsect, dr); //code:20261104 a management document shared back under its request keeps its description
                 } catch (ex) {
                     ////c_log("docs", ex)
                 }
             }
         }
     }
+
+    MGTPopPrivateDocs();
 }
 
-function delExamDoc(fid, go) {
+//code:20261103 two boxes under each question's document requests, for documents under no document request:
+//  "Management only" (NEO_MgtGetExamDocs rows with IsPrivate = 1): management only, never the examined company
+//  "Shared by management" (IsPrivate = 0, DocReqID ''): management documents shared with the examined company,
+//  shown to everyone who can see the exam (CMSMailbox too), only when there are some; x / Make private for management
+function MGTPopPrivateDocs() {
+    var xcName = String(MgtXCompany || "the company").replace(/\|/g, "/");
+    for (var l = 0; l < MGTLineIDs.length; l++) {
+        var ln = MGTLineIDs[l];
+        var sect = document.getElementById("answerDocs_" + ln.strLineID);
+        if (sect == null) continue;
+
+        var shared = jsMgtDocs.filter(d => d.LineID == ln.LineID && d.IsPrivate == 0 && d.DocReqID == "" && d.Document_Request == null && d.FID != null);
+        if (shared.length > 0) {
+            //code:20261110 John: shared management documents also go above the document requests
+            //(below the Management only box, which is inserted at the top after this)
+            var sharedBox = document.createElement("div");
+            sharedBox.className = "mgtSharedDocsBox";
+            sharedBox.style.cssText = "background-color:#f2f7fc; border-radius:4px; margin-bottom:8px"; //code:20261110 subtle tint for shared management documents
+            sect.insertBefore(sharedBox, sect.firstChild);
+            xsection(sharedBox, [
+                "div|class=docrequest shadowSection mgtSharedDocs|style=padding:5px; font-weight:bold; background-color:#e6f0fa|&#128275; Management documents shared with " + xcName, //code:20261110 unlocked padlock (Management only has the locked one)
+                "div|id=docShared_" + ln.strLineID + "|class=mgtSharedDocs|style=padding:10px"
+            ]);
+            for (var i = 0; i < shared.length; i++) {
+                var dr = shared[i];
+                var onclick = "reportLoadFiles(" + dr.FID + ",'" + dr.Filename + "','Application')";
+                xsection(document.getElementById("docShared_" + ln.strLineID), [
+                    "div|id=docReq_" + dr.FID +
+                    ((MgtDocsMgtView) ? "|||label|class=redlink|onclick=delExamDoc(" + dr.FID + ",false," + dr.DocFID + ")|x|||label|style=width:10px" : "") +
+                    "|||label|icon=file-receiving.png|class=cursor|onclick=" + onclick + "|" + dr.Filename + mgtRelLbl(dr) +
+                    ((MgtDocsMgtView) ? "|||label|class=cursor mgtDocPrivToggle|style=color:steelblue; padding-left:15px; font-weight:normal|onclick=MgtToggleDocPrivate(" + dr.DocFID + ",1)|Make private" : ""),
+                    "div|id=docReq2_" + dr.FID + "|style=font-weight:normal; padding:left:10px; padding:5px|Loaded By: " + dr.LoadedByName + " with " + dr.LoadedByCompany + " on " + convertDT(dr.DTCreated) + ", shared with " + xcName + //code:20261113 John: Loaded By not bold in the management boxes
+                    mgtDocDescLink(dr),
+                ]);
+                mgtDocDescShow(document.getElementById("docShared_" + ln.strLineID), dr);
+            }
+        }
+
+        if (!MgtDocsMgtView) continue;
+
+        //code:20261110 John: the Management only box goes above the question's document requests
+        var privBox = document.createElement("div");
+        privBox.className = "mgtPrivateDocs";
+        privBox.style.cssText = "background-color:#fffcf2; border-radius:4px; margin-bottom:8px"; //code:20261110 subtle tint for management only documents
+        sect.insertBefore(privBox, sect.firstChild);
+        xsection(privBox, [
+            "div|class=docrequest shadowSection mgtPrivateDocs|style=padding:5px; font-weight:bold; background-color:#fff8e1|&#128274; Documents for Management only (not visible to the examined company)" + //code:20261113 John's wording
+            "|||button|class=longblueButton pad10 plusBtn|style=float:right|onclick=MGTUploadDocs(" + MgtXCID + ",'" + ln.ExamID + "','" + ln.LineID + "',null,null,1)|+",
+            "div|id=docPriv_" + ln.strLineID + "|class=mgtPrivateDocs|style=padding:10px"
+        ]);
+
+        var xx = jsMgtDocs.filter(d => d.LineID == ln.LineID && d.IsPrivate == 1 && d.FID != null);
+        for (var i = 0; i < xx.length; i++) {
+            var dr = xx[i];
+            var onclick = "reportLoadFiles(" + dr.FID + ",'" + dr.Filename + "','Application')";
+            xsection(document.getElementById("docPriv_" + ln.strLineID), [
+                "div|id=docReq_" + dr.FID +
+                "|||label|class=redlink|onclick=delExamDoc(" + dr.FID + ",false," + dr.DocFID + ")|x" +
+                "|||label|style=width:10px" +
+                "|||label|icon=document-white.png|class=cursor|onclick=" + onclick + "|" + dr.Filename +
+                "|||label|class=cursor mgtDocPrivToggle|style=color:steelblue; padding-left:15px; font-weight:normal|onclick=MgtToggleDocPrivate(" + dr.DocFID + ",0)|Share with " + String(MgtXCompany || "company").replace(/\|/g, "/"),
+                "div|id=docReq2_" + dr.FID + "|style=font-weight:normal; padding:left:10px; padding:5px|Loaded By: " + dr.LoadedByName + " with " + dr.LoadedByCompany + " on " + convertDT(dr.DTCreated) + //code:20261113 John: Loaded By not bold in the management boxes
+                mgtDocDescLink(dr),
+            ]);
+            mgtDocDescShow(document.getElementById("docPriv_" + ln.strLineID), dr);
+        }
+    }
+}
+
+//code:20261104 description on management documents (the two boxes above; NEO_MgtGetExamDocs.Description, saved by
+//_MgtSetDocDescription). Only a user of the company that loaded the document can add or change it (the server checks too).
+function mgtCanEditDocDesc(dr) {
+    return MgtPrivateDocsEnabled && !MgtSnapshot && dr.DocFID != null && dr.LoadedByCID == myCID;
+}
+
+// "Add description" / "Edit description" link, appended to the Loaded By line
+function mgtDocDescLink(dr) {
+    if (!mgtCanEditDocDesc(dr)) return "";
+    return "|||label|class=cursor mgtDocDescEdit|style=color:steelblue; padding-left:15px; font-weight:normal|onclick=MgtEditDocDesc(" + dr.DocFID + ")|" +
+        ((dr.Description) ? "Edit description" : "Add description");
+}
+
+// the description, above the document's filename row (John 2026-11-04); set as text, because xsection reads "=" and "|" in its strings as markup
+function mgtDocDescShow(parent, dr) {
+    if (parent == null || !dr.Description) return;
+    var d = document.createElement("div");
+    d.id = "docReq3_" + dr.FID; // removed with the row by delExamDoc
+    d.className = "mgtDocDesc";
+    d.style.cssText = "padding:5px 5px 2px 5px; white-space:pre-wrap; font-weight:bold; font-size:15px; color:#222"; //code:20261113 John: description bolder and bigger
+    d.textContent = dr.Description;
+    var row = document.getElementById("docReq_" + dr.FID);
+    if (row != null && row.parentElement == parent) parent.insertBefore(d, row);
+    else parent.appendChild(d);
+}
+
+var MgtDocDescQueue = [];
+
+// a management document's a_aMGTExamDocs FIDs on a question (before an upload, to find the new ones after it)
+function mgtPrivDocFIDs(LineID) {
+    return jsMgtDocs.filter(d => d.LineID == LineID && d.IsPrivate == 1 && d.DocFID != null).map(d => d.DocFID);
+}
+
+// after a Management only upload: ask for a description of each new document, one at a time (optional)
+function mgtPromptNewDocDescs(LineID, before) {
+    MgtDocDescQueue = mgtPrivDocFIDs(LineID).filter(f => before.indexOf(f) == -1);
+    mgtNextDocDesc();
+}
+
+function mgtNextDocDesc() {
+    if (MgtDocDescQueue.length == 0) return;
+    MgtEditDocDesc(MgtDocDescQueue.shift(), true);
+}
+
+function MgtEditDocDesc(DocFID, fromUpload) {
+    var dr = jsMgtDocs.find(d => d.DocFID == DocFID);
+    if (dr == null) { mgtNextDocDesc(); return; }
+
+    xconfirm(null, [
+        "div|class=hdr|style=background-color:whitesmoke|" + ((fromUpload) ? "Add a description (optional)" : "Document description"),
+        "div|id=mgtDocDescName|style=padding:8px 0; font-weight:bold",
+        "textarea|id=mgtDocDescInput|maxlength=1000|style=width:100%; height:180px; box-sizing:border-box",
+        "div|style=font-size:11px; color:gray; padding-top:4px|" + ((fromUpload) ? "Leave it blank to skip. " : "") + "Up to 1000 characters."
+    ], "MgtSaveDocDesc(" + DocFID + ")");
+    mgtDocDescName.textContent = dr.Filename;
+    mgtDocDescInput.value = dr.Description || "";
+    try { xconfirmContinue.innerHTML = "Save"; } catch (e) { }
+    mgtDocDescInput.focus();
+}
+
+function MgtSaveDocDesc(DocFID) {
+    var dr = jsMgtDocs.find(d => d.DocFID == DocFID);
+    var txt = mgtDocDescInput.value.trim();
+    xconfirm();
+    if (dr != null && txt == (dr.Description || "")) { mgtNextDocDesc(); return; }
+
+    getData(null, newFormData("_MgtSetDocDescription", { fid: DocFID, description: txt }), function (vr) {
+        var js = jparse(vr);
+        if (js.length > 0 && js[0].Msg != null) {
+            MgtDocDescQueue = [];
+            xconfirm(js[0].Msg);
+            return;
+        }
+        jsMgtDocs = js;
+        MGTPopDocs();
+        mgtNextDocDesc();
+    });
+}
+
+//code:20261103 make a document private (makePrivate 1) or share it with the examined company (0). Sharing never asks
+//for a document request: the server puts it back under the request it came from if there was one, otherwise it
+//shows in the question's "Management documents shared with <company>" box.
+function MgtToggleDocPrivate(DocFID, makePrivate) {
+    xconfirm();
+    getData(null, newFormData("_MgtSetDocPrivate", { fid: DocFID, private: makePrivate }), function (vr) {
+        var js = jparse(vr);
+        if (js.length > 0 && js[0].Msg != null) {
+            xconfirm(js[0].Msg);
+            return;
+        }
+        jsMgtDocs = js;
+        MGTPopDocs();
+        refreshOFiles();
+    });
+}
+
+function delExamDoc(fid, go, docfid) {
+    //code:20261103 docfid = the a_aMGTExamDocs FID to delete (fid can be the linked CMS file's FID); fid still names the elements
+    docfid = (docfid != null) ? docfid : fid;
     if (!go) {
-        xconfirm("Are you sure you want to remove this file from the application?", null, "delExamDoc(" + fid + ",true)");
+        xconfirm("Are you sure you want to remove this file from the application?", null, "delExamDoc(" + fid + ",true," + docfid + ")");
     } else {
         xconfirm();
-        getData(null, newFormData("_MgtDeleteFormDoc", { fid: fid }), function (vr) {
+        getData(null, newFormData("_MgtDeleteFormDoc", { fid: docfid }), function (vr) {
             refreshOFiles();
             var x = document.getElementById("docReq_" + fid);
             var xx = document.getElementById("docReq2_" + fid);
             x.parentElement.removeChild(x);
             xx.parentElement.removeChild(xx);
+            var x3 = document.getElementById("docReq3_" + fid); //code:20261104 its description
+            if (x3) x3.parentElement.removeChild(x3);
         });
     }
 }
 
-function MGTUploadDocs(xCID, ExamID, LineID, DocReqID, fromPCorCMS) {
+function MGTUploadDocs(xCID, ExamID, LineID, DocReqID, fromPCorCMS, isPrivate) {
+    //code:20261103 isPrivate = 1: the Management only box (DocReqID ''); the server ignores the toggle account
+    isPrivate = (isPrivate == 1) ? 1 : 0;
+    if (isPrivate) { DocReqID = null; } // prms() writes '' as an empty argument; the server stores ''
     MGTUploadDocs_Params = [xCID, 0, ExamID, LineID, DocReqID];
     ////c_log("jsExamCMSFiles", jsExamCMSFiles);
     
@@ -1429,14 +1642,14 @@ function MGTUploadDocs(xCID, ExamID, LineID, DocReqID, fromPCorCMS) {
             }
 
             var elems = [
-                "div|class=hdr|style=background-color:whitesmoke|Attach a Document",
+                "div|class=hdr|style=background-color:whitesmoke|" + ((isPrivate) ? "Attach a Management only Document" : "Attach a Document"),
                 "hr", "br",
-                "div|style=display:" + ((myCID == xCID || xx.length == 0) ? "none" : "") + "|||input|type=checkbox|id=cbUseToggleAcct|checked=true|value=" + xUID +
+                "div|style=display:" + ((myCID == xCID || xx.length == 0 || isPrivate) ? "none" : "") + "|||input|type=checkbox|id=cbUseToggleAcct|checked=true|value=" + xUID +
                 "|||label|class=padLeft10|style=font-size:10px; font-weght:normal; color:black|Use your account for [" + xCompany + "]|||br|||br",
                 "",
-                "button|id=btnExamUploDocs1|class=longblueButton|style=width:300px|onclick=MGTUploadDocs(" + prms([xCID, ExamID, LineID, DocReqID, 1]) + ")|From PC",
+                "button|id=btnExamUploDocs1|class=longblueButton|style=width:300px|onclick=MGTUploadDocs(" + prms([xCID, ExamID, LineID, DocReqID, 1, isPrivate]) + ")|From PC",
                 "br", "br",
-                "button|id=btnExamUploDocs2|class=longblueButton|style=width:300px|onclick=MGTUploadDocs(" + prms([xCID, ExamID, LineID, DocReqID, 2]) + ")|From CMS"
+                "button|id=btnExamUploDocs2|class=longblueButton|style=width:300px|onclick=MGTUploadDocs(" + prms([xCID, ExamID, LineID, DocReqID, 2, isPrivate]) + ")|From CMS"
             ];
             xconfirm(null, elems, "cancel");
         });
@@ -1445,7 +1658,7 @@ function MGTUploadDocs(xCID, ExamID, LineID, DocReqID, fromPCorCMS) {
         xconfirm();
         try { inputMGTUpload.parentElement.removeChild(inputMGTUpload); } catch (e) { };
         xsection(PageContainer, [
-            "input|type=file|id=inputMGTUpload|multiple=true|style=display:none|onchange=MGTUploadDocsGO(" + xCID + "," + xUID + ",'" + ExamID + "','" + LineID + "','" + DocReqID + "')"
+            "input|type=file|id=inputMGTUpload|multiple=true|style=display:none|onchange=MGTUploadDocsGO(" + xCID + "," + xUID + ",'" + ExamID + "','" + LineID + "','" + DocReqID + "',0," + isPrivate + ")"
         ]);
         inputMGTUpload.click();
     } else if (fromPCorCMS == 2) {
@@ -1454,7 +1667,7 @@ function MGTUploadDocs(xCID, ExamID, LineID, DocReqID, fromPCorCMS) {
         xconfirm();
 
         selectedCMSFiles = [];
-        PopUp("Select from CMS Files", [xCID, xUID, ExamID, LineID, DocReqID, fromPCorCMS], null, null, ["400px", "900px"]);
+        PopUp("Select from CMS Files", [xCID, xUID, ExamID, LineID, DocReqID, fromPCorCMS, isPrivate], null, null, ["400px", "900px"]);
     };
 
         //btnExamUploDocs1.disabled = true;
@@ -1667,17 +1880,19 @@ function SelectCMSFilesHiLite(FID) {
     }
 }
 
-function submitCMSFiles(xCID, xUID, ExamID, LineID, DocReqID, fromPCorCMS) {
+function submitCMSFiles(xCID, xUID, ExamID, LineID, DocReqID, fromPCorCMS, isPrivate) {
     console.log("_MGTExamAttachCMSDoc", { xcid: xCID, examid: ExamID, lineid: LineID, docreqid: DocReqID, FIDS: selectedCMSFiles.join(",") });
-    var data = newFormData("_MGTExamAttachCMSDoc",
-        { xcid: xCID, xuid: xUID, examid: ExamID, lineid: LineID, docreqid: DocReqID, FIDS: selectedCMSFiles.join(",") }
-    );
+    var p = { xcid: xCID, xuid: xUID, examid: ExamID, lineid: LineID, docreqid: DocReqID, FIDS: selectedCMSFiles.join(",") };
+    if (isPrivate == 1) { p.private = 1; } //code:20261103 last: adHoc binds by position (@private)
+    var data = newFormData("_MGTExamAttachCMSDoc", p);
+    var descBefore = mgtPrivDocFIDs(LineID); //code:20261104
     getData(null, data, function (vr) {
         closePopUp("Select from CMS Files");
 
         jsMgtDocs = jparse(vr);
         MGTPopDocs();
         refreshOFiles();
+        if (isPrivate == 1) mgtPromptNewDocDescs(LineID, descBefore); //code:20261104 ask for a description of each new document
 
         //code:20240522:1133am - remove hover elem when done
         var fh = document.getElementsByClassName("FileHover");
@@ -1687,24 +1902,30 @@ function submitCMSFiles(xCID, xUID, ExamID, LineID, DocReqID, fromPCorCMS) {
     });
 }
 
-function MGTUploadDocsGO(xCID, xUID, ExamID, LineID, DocReqID, ix) {
+var MgtUploadDescBefore = []; //code:20261104 private documents on the question before this upload
+
+function MGTUploadDocsGO(xCID, xUID, ExamID, LineID, DocReqID, ix, isPrivate) {
     ix = (ix == null) ? 0 : ix;
     var fils = inputMGTUpload.files;
+    if (ix == 0) MgtUploadDescBefore = mgtPrivDocFIDs(LineID);
 
     if (ix < fils.length) {
         var fil = fils[ix];
 
-        var data = newFormData("_MGTExamUploadDoc", { xcid: xCID, xuid: xUID, examid: ExamID, lineid: LineID, docreqid: DocReqID });
+        var p = { xcid: xCID, xuid: xUID, examid: ExamID, lineid: LineID, docreqid: DocReqID };
+        if (isPrivate == 1) { p.private = 1; } //code:20261103 last: adHoc binds by position (@private)
+        var data = newFormData("_MGTExamUploadDoc", p);
         data.append(fil.name, fil);
 
         getData("#adHocAttach", data, function (vr) {
             jsMgtDocs = jparse(vr);
             ix++;
-            MGTUploadDocsGO(xCID, xUID, ExamID, LineID, DocReqID, ix);
+            MGTUploadDocsGO(xCID, xUID, ExamID, LineID, DocReqID, ix, isPrivate);
         });
     } else {
         MGTPopDocs();
         refreshOFiles();
+        if (isPrivate == 1) mgtPromptNewDocDescs(LineID, MgtUploadDescBefore); //code:20261104 ask for a description of each new document
     }
 }
 
@@ -1912,7 +2133,7 @@ function MGTPopAnswers(passedLineID, passedQNum, onDone) {
                                     "icon.onmouseover=divAnswer_" + ansID + "_icon.setAttribute('style', '" + stOver + "')|" +
                                     "icon.onmouseout=divAnswer_" + ansID + "_icon.setAttribute('style', '" + stOut + "')|" +
                                     "id=divAnswer_" + ansID + "|style=padding-left:10px|" + ans + "|||" +
-                                    "div|id=divAnswer_" + ansID + "_AnsBy|style=background-color:" + ansColor + "; padding-left:10px; padding:5px|" + UpdAns + ansBy
+                                    "div|id=divAnswer_" + ansID + "_AnsBy|style=background-color:" + ansColor + "; padding-left:10px; padding:5px|" + UpdAns + ansBy + mgtRelTag(xjs)
                                 ]);
 
                                 document.getElementById("divAnswer_" + ansID).className = "padLeft10";
@@ -1975,7 +2196,7 @@ function MGTPopAnswers(passedLineID, passedQNum, onDone) {
                                             var cbFld = document.getElementById("cbanswer_" + strLineID + "_" + ix);
                                             if (cbFld.value == MGTAuditLayers[ii]["Name"]) {
                                                 fld.checked = true;
-                                                fldD.innerHTML = "Answered By: " + ansBy;
+                                                fldD.innerHTML = "Answered By: " + ansBy + mgtRelTag(xjs);
                                                 fldD.className = "padLeft10 pad5";
                                                 fldD.style.backgroundColor = ansColor;
                                             }
@@ -1991,7 +2212,7 @@ function MGTPopAnswers(passedLineID, passedQNum, onDone) {
                                                 "icon.onmouseover=divAnswer_" + ansID + "_icon.setAttribute('style', '" + stOver + "')|" +
                                                 "icon.onmouseout=divAnswer_" + ansID + "_icon.setAttribute('style', '" + stOut + "')|" +
                                                 "id=divAnswer_" + ansID + "|class=PadLeft10|" + ans + "|||" +
-                                                "div|id=divAnswer_" + ansID + "_AnsBy|class=padLeft10 pad5|" + UpdAns + ansBy
+                                                "div|id=divAnswer_" + ansID + "_AnsBy|class=padLeft10 pad5|" + UpdAns + ansBy + mgtRelTag(xjs)
                                             ]);
                                             document.getElementById("divAnswer_" + ansID).className = "padLeft10";
                                             document.getElementById("divAnswer_" + ansID + "_AnsBy").style.backgroundColor = ansColor;
@@ -2708,6 +2929,9 @@ function PDFPreview(main) {
     // Clone the content
     var clonedContent = contentDiv.cloneNode(true);
 
+    //code:20261103 never print management-only documents or the private/shared links (the PDF can be shared)
+    clonedContent.querySelectorAll('.mgtPrivateDocs, .mgtDocPrivToggle, .mgtDocDescEdit').forEach(function (e) { e.parentNode.removeChild(e); });
+
     // Remove unwanted elements
     var textboxes = clonedContent.querySelectorAll('textarea');
     previewQuestions = clonedContent.querySelectorAll('[id^=question-]');
@@ -3245,7 +3469,7 @@ var MgtSnapReads = {
 };
 
 // exam writes refused by getData while a snapshot is open - they would otherwise write to the LIVE exam
-var MgtSnapBlockedWrites = /^_(MgtUpdateAnswers?|MgtArchiveAnswer|MgtUpdateLMC|MgtUpdateForm|MgtDeleteFormDoc|MGTExamAttachCMSDoc|MGTExamUploadDoc|SetExamDefaultScores|MgtWorkflowRemoveAction)$/;
+var MgtSnapBlockedWrites = /^_(MgtUpdateAnswers?|MgtArchiveAnswer|MgtUpdateLMC|MgtUpdateForm|MgtDeleteFormDoc|MGTExamAttachCMSDoc|MGTExamUploadDoc|SetExamDefaultScores|MgtWorkflowRemoveAction|MgtSetDocPrivate|MgtSetDocDescription)$/;
 
 // [actions[], params[]] -> the snapshot equivalents when a snapshot is open.
 // snapshotid goes FIRST: the adHoc dispatcher binds params positionally in key order (exec NEO_x @uid, @snapshotid, ...)
@@ -3273,6 +3497,8 @@ function setMgtSnapshot(snapshot) {
         st.textContent =
             "#availExamsInner.mgtSnapRO textarea, #availExamsInner.mgtSnapRO input, #availExamsInner.mgtSnapRO select," +
             "#availExamsInner.mgtSnapRO [onclick*='MgtEditAnswer'], #availExamsInner.mgtSnapRO [onclick*='MGTUpload']," +
+            "#availExamsInner.mgtSnapRO [onclick*='MgtToggleDocPrivate']," +
+            "#availExamsInner.mgtSnapRO [onclick*='MgtEditDocDesc']," +
             "#availExamsInner.mgtSnapRO [onclick*='MGTSetDefaultScores'] { pointer-events:none; }" +
             "#availExamsInner.mgtSnapRO textarea, #availExamsInner.mgtSnapRO input { background-color:#f6f6f6; }";
         document.head.appendChild(st);
@@ -3979,3 +4205,126 @@ function mgtWorkflowSend(ExamID, xCID, btn) {
             console.log("SendWorkflowPdf failed", ex);
         });
 }
+
+
+//******************************************************************************************************************************
+//code:20261110 Release Status (SharedSQLWithClaude/FEATURE_ExamReleaseStatus): every change a company makes to an exam
+//(answers, scores, documents, remediations) is saved unreleased - only that company sees it - until it clicks Release.
+//  _MgtGetExamPending      { examid, xcid } -> Answers, Scores, Docs, Total, Company (the caller's company's unreleased count)
+//  _MgtReleaseExamChanges  { examid, xcid } -> releases all of it
+//The bar (#mgtReleaseBar, built in viewMgtExam above the scrolling exam) shows while Total > 0. It is refreshed after the
+//exam loads and shortly after every write below (newFormData is wrapped, so no call site has to remember).
+var MgtPending = null;
+var MGT_REL_WRITES = ["_MgtUpdateAnswer", "_MgtUpdateAnswers", "_MgtArchiveAnswer", "_MgtUpdateLMC", "_SetExamDefaultScores",
+    "_MGTExamUploadDoc", "_MGTExamAttachCMSDoc", "_MgtDeleteFormDoc", "_MgtSetDocPrivate", "_MgtSetDocDescription"];
+
+(function () {
+    if (typeof newFormData !== "function" || newFormData._mgtRel) return;
+    var orig = newFormData;
+    newFormData = function (action) {
+        var r = orig.apply(this, arguments);
+        if (MGT_REL_WRITES.indexOf(action) > -1) mgtPendingSoon();
+        return r;
+    };
+    newFormData._mgtRel = true;
+})();
+
+(function () {
+    if (document.getElementById("mgtRelStyles")) return;
+    var st = document.createElement("style");
+    st.id = "mgtRelStyles";
+    st.textContent =
+        "#mgtReleaseBar{position:sticky;top:0;z-index:900;margin:6px 0;padding:8px 12px;background:#fff4e0;border:2px solid #e8912d;" +
+        "border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,.15);align-items:center;gap:14px;font-size:13px;color:#5a3300}" +
+        "#mgtReleaseBar .mgtRelMsg{flex:1 1 auto}" +
+        "#mgtReleaseBar button{flex:0 0 auto;background:#d9480f;color:#fff;border:0;border-radius:5px;padding:9px 22px;font-size:15px;" +
+        "font-weight:bold;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.3)}" +
+        "#mgtReleaseBar button:hover{background:#b83a0a}#mgtReleaseBar button:disabled{background:#aaa;cursor:default}" +
+        "mgt-unrel,.mgtRelTagLbl{display:inline-block;background:#fde2b8;color:#8a4b00;border-radius:3px;padding:0 6px;margin-left:8px;" +
+        "font-size:11px;font-weight:bold;vertical-align:middle}";
+    document.head.appendChild(st);
+})();
+
+//"Unreleased" tag for an answer row (HTML text: ndyn splits attribute text on "=", so a tag with no attributes)
+function mgtRelTag(row) {
+    return (row && row.Unreleased) ? " <mgt-unrel>Unreleased</mgt-unrel>" : "";
+}
+//"Unreleased" tag appended to a document row's ndyn string
+function mgtRelLbl(dr) {
+    return (dr && dr.Unreleased) ? "|||label|class=mgtRelTagLbl|title=Only your company sees this until you release your changes|Unreleased" : "";
+}
+
+var mgtPendingTimers = [];
+function mgtPendingSoon() {
+    mgtPendingTimers.forEach(function (t) { clearTimeout(t); });
+    mgtPendingTimers = [setTimeout(mgtRefreshPending, 1200), setTimeout(mgtRefreshPending, 4000)];
+}
+
+function mgtRefreshPending() {
+    if (MgtSnapshot || !MgtExamID || !document.getElementById("mgtReleaseBar")) return;
+    var examid = MgtExamID, xcid = MgtXCID;
+    getData(null, newFormData("_MgtGetExamPending", { examid: examid, xcid: xcid }), function (vr) {
+        if (examid != MgtExamID || xcid != MgtXCID) return;
+        try { MgtPending = jparse(vr)[0] || null; } catch (e) { MgtPending = null; }
+        mgtRenderReleaseBar();
+    });
+}
+
+function mgtRenderReleaseBar() {
+    var bar = document.getElementById("mgtReleaseBar");
+    if (!bar) return;
+    var p = MgtPending;
+    if (!p || !(p.Total > 0)) { bar.style.display = "none"; bar.innerHTML = ""; mgtExamFitHeight(); return; } //code:20261113 refit when the bar hides
+
+    var parts = [];
+    if (p.Answers > 0) parts.push(p.Answers + " answer" + (p.Answers == 1 ? "" : "s"));
+    if (p.Scores > 0) parts.push(p.Scores + " score" + (p.Scores == 1 ? "" : "s"));
+    if (p.Docs > 0) parts.push(p.Docs + " document" + (p.Docs == 1 ? "" : "s"));
+    var who = String(p.Company || "your company");
+
+    bar.innerHTML = "";
+    var msg = document.createElement("div");
+    msg.className = "mgtRelMsg";
+    msg.innerHTML = "<b>&#9888; You have " + p.Total + " unreleased change" + (p.Total == 1 ? "" : "s") + "</b> (" + parts.join(", ") + "). " +
+        "They are saved, but only " + mgtRelEsc(who) + " can see them until you release them.";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Release changes";
+    btn.onclick = function () { mgtReleaseChanges(btn); };
+    bar.appendChild(msg);
+    bar.appendChild(btn);
+    bar.style.display = "flex";
+    mgtExamFitHeight(); //code:20261113 the bar sits above the scrolling exam, so the exam gets shorter while it shows
+}
+
+function mgtRelEsc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function mgtReleaseChanges(btn) {
+    var p = MgtPending;
+    if (!p || !(p.Total > 0)) return;
+    if (!confirm("Release " + p.Total + " change" + (p.Total == 1 ? "" : "s") + " to this exam?\n\nEveryone who can see this exam will see them.")) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Releasing ..."; }
+    var examid = MgtExamID, xcid = MgtXCID, xcompany = MgtXCompany;
+    getData(null, newFormData("_MgtReleaseExamChanges", { examid: examid, xcid: xcid }), function (vr) {
+        var r = null;
+        try { r = jparse(vr)[0]; } catch (e) { r = null; }
+        if (!r || r.err != null) {
+            alert("Your changes could not be released. Please try again.");
+            if (btn) { btn.disabled = false; btn.textContent = "Release changes"; }
+            return;
+        }
+        MgtPending = r;
+        //reload the exam so every "Unreleased" tag and the workflow reflect the release
+        viewMgtExam(examid, xcid, xcompany);
+    });
+}
+
+//leaving the page (or the Exams window / mailbox) with unreleased changes: the browser asks first
+window.addEventListener("beforeunload", function (e) {
+    if (MgtPending && MgtPending.Total > 0 && document.getElementById("mgtReleaseBar")) {
+        e.preventDefault();
+        e.returnValue = "";
+    }
+});
