@@ -75,7 +75,10 @@
         .msgRow:hover { background: #f0f4fa; }
         .msgRow.unread { font-weight: bold; }
         /* The message open on the right. Inset so the bordered row keeps its size. */
-        .msgRow.selected { background: #eef4ff; box-shadow: inset 0 0 0 2px #2c6bd6; border-radius: 3px; }
+        /* 2026-11-17: stronger (John couldn't tell which message was open) — solid
+           tint plus a thick left bar, and it wins over :hover and .checked. */
+        .msgRow.selected, .msgRow.selected:hover, .msgRow.selected.checked { background: #d6e4ff; box-shadow: inset 5px 0 0 #2c6bd6, inset 0 0 0 1px #2c6bd6; }
+        .msgRow.selected .subj { color: #1a4fa8; }
         .msgRow .subj { display: block; }
         .msgRow .meta { font-size: 12px; color: #777; font-weight: normal; }
         .msgRow .clip { margin-right: 4px; font-size: 13px; }
@@ -1209,7 +1212,7 @@
                 div.className = "msgRow" + (folder === "inbox" && !m.DTViewed ? " unread" : "");
                 div.onclick = function () { openMessage(m.MessageID); };
                 div.setAttribute("data-message-id", m.MessageID);
-                if (m.MessageID === currentMessageId) div.classList.add("selected");
+                if (currentMessageId != null && Number(m.MessageID) === Number(currentMessageId)) div.classList.add("selected");
                 var who = folder === "sent"
                     ? "To " + escapeHtml(m.ToNames || "")
                     : escapeHtml(m.FromName) + " (" + escapeHtml(m.FromCompany) + ")";
@@ -1320,7 +1323,7 @@
         // Outlines the open message's row in the list (see .msgRow.selected).
         function markSelectedRow() {
             document.querySelectorAll("#inboxList .msgRow").forEach(function (row) {
-                row.classList.toggle("selected", parseInt(row.getAttribute("data-message-id"), 10) === currentMessageId);
+                row.classList.toggle("selected", currentMessageId != null && parseInt(row.getAttribute("data-message-id"), 10) === Number(currentMessageId));
             });
         }
 
@@ -2511,7 +2514,7 @@
             card.appendChild(frame);
             document.getElementById("mbxFullscreenTitle").textContent = line.getAttribute("data-title");
             // A form's button becomes "Close without saving" only once it has save
-            // buttons to offer (mbxSyncSaveButtons); a view-only record just closes.
+            // buttons and an unsaved change (mbxSyncSaveButtons); otherwise it is "Close".
             document.getElementById("mbxCloseBtn").textContent = "Close";
             document.getElementById("mbxFullscreenHint").textContent = kind === "exam" ? "Your answers are saved as you type them." : "";
             mbxSetFullscreen(frame);
@@ -2560,7 +2563,10 @@
             Array.prototype.forEach.call(doc.querySelectorAll("#dispButtons > button:not(.btnIASave)"), function (b) {
                 if (/^\s*Save/i.test(b.textContent) && b.style.display !== "none") b.style.display = "none";
             });
-            document.getElementById("mbxCloseBtn").textContent = originals.length ? "Close without saving" : "Close";
+            // "Close without saving" only once something was actually changed (John
+            // 2026-11-17); the observer re-runs this when the frame's body gets mbxDirty.
+            document.getElementById("mbxCloseBtn").textContent =
+                (originals.length && doc.body.classList.contains("mbxDirty")) ? "Close without saving" : "Close";
             var holder = document.getElementById("mbxFullscreenSaves");
             var sig = originals.map(function (b) { return b.textContent + "|" + b.disabled + "|" + b.title; }).join("~");
             if (holder.getAttribute("data-sig") !== sig) {
@@ -2631,20 +2637,15 @@
         window.addEventListener("message", function (event) {
             if (event.origin !== window.location.origin) return;
             if (event.data && event.data.mbxActivity) { resetIdle(); return; }
-            // ia-viewer.html's mbxRecordSaved(): a record was just saved. Save for
-            // Use closes it (back to its summary line); Save & Review re-opens it in
-            // place so the user stays on it until they Save for Use or Close
-            // (2026-11-10). Either way refresh the task lines and that line's record
-            // ID — not the whole message.
+            // ia-viewer.html's mbxRecordSaved(): a record was just saved. Every save
+            // re-opens it in place; only Close closes it (John 2026-11-17 — Save for Use
+            // used to close it). Either way refresh the task lines and that line's
+            // record ID — not the whole message.
             if (event.data && event.data.mbxRecordSaved) {
                 if (mbxFullscreenFrame && mbxFullscreenFrame.contentWindow === event.source) {
-                    if (event.data.released) {
-                        mbxClearFullscreen();
-                        mbxShowSavedNotice(event.data.notice || "Record saved");
-                    } else {
-                        mbxReloadOpenRecord(mbxFullscreenFrame);
-                        mbxShowSavedNotice("Record saved. It stays open for review until you Save for Use or Close.");
-                    }
+                    mbxReloadOpenRecord(mbxFullscreenFrame);
+                    // Approve/Decline and Set as Closed/Open pass their own notice.
+                    mbxShowSavedNotice(event.data.notice || "Record saved");
                 }
                 refreshTaskCards();
                 return;
