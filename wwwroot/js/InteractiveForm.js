@@ -2245,7 +2245,8 @@ function ShareToMailbox(MainID, FormID, Label) {
             for (var i = 0; i < dat.length; i++) {
                 var opt = document.createElement("option");
                 opt.value = dat[i].UID;
-                opt.text = dat[i].Name + " <" + dat[i].Email + ">";
+                //code:20261117 ia_001: name + company, like Assign Tasks (NEO_IAGetRecipients now returns Company)
+                opt.text = dat[i].Name + (dat[i].Company ? " (" + dat[i].Company + ")" : "") + " <" + dat[i].Email + ">";
                 sel.appendChild(opt);
             }
         })
@@ -2261,7 +2262,8 @@ function SubmitShareToMailbox(MainID, FormID, Label) {
     var sel = document.getElementById("shareMailboxRecipients");
     var recipients = [];
     for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].selected) recipients.push(parseInt(sel.options[i].value));
+        // one person can be listed once per company; send them one copy
+        if (sel.options[i].selected && recipients.indexOf(parseInt(sel.options[i].value)) == -1) recipients.push(parseInt(sel.options[i].value));
     }
 
     var errDiv = document.getElementById("shareMailboxError");
@@ -2407,8 +2409,11 @@ function ViewDispGO(js, jsVals, JoinedID, JoinedTitle, jsMgtData, jsMultiAnswers
         "|||label|id=IARecordOpenClosed|class=sm padLeft10" +
         "|||label|id=dispButtons|class=padRight10|style=float:right; white-space:nowrap",
         ((SystemLinkFID) ? "div|id=dispSystemLink|Filename:|||label|class=alink padLeft10|onclick=reportLoadFiles(" + SystemLinkFID + ",'" + SystemLinkFilename + "','" + SystemLinkType + "')|Filename:" + SystemLinkFilename : "")
-        
+
     ]);
+    //code:20261118 CMS ar_001 port: an Action Request on a whole dynamic report or another form record
+    //has no SystemLinkFID, so the banner link was missing in the mailbox; look the target up
+    if (!SystemLinkFID && js.MainID > 0 && cloneID == null) mbxShowActionRequestTarget(js.MainID);
 
 
 
@@ -2429,10 +2434,8 @@ function ViewDispGO(js, jsVals, JoinedID, JoinedTitle, jsMgtData, jsMultiAnswers
 
     }
 
-    xsection(dispButtons, [
-        "button|id=iaBackBtn|class=blueButton|onclick=SwitchReport()|<-- Back",
-        "label|class=padLeft10"
-    ]);
+    //CMSMailbox adaptation 20261118 (John): no Back button. The mailbox viewer is never CMS's main
+    //Form Applications section, so there is no report list to go back to.
     console.log("approvalBy", jsVals[0].ApprovalBy, myCID);
     if (js.Status == "Pending approval" && jsVals[0].ApprovalBy.ApprovalCID == myCID) {
         xsection(dispButtons, [
@@ -2475,8 +2478,8 @@ function ViewDispGO(js, jsVals, JoinedID, JoinedTitle, jsMgtData, jsMultiAnswers
                     "button|name=btnSave|class=btnIASave blueButton|onclick=SubmitRecord(" + js.MainID + ", " + isReleased + ")|Save"),
                 "label|class=padLeft10",
 
-                ((js.MainID == 0) ? "" : (isReleased == 1) ? "" : (!canRelease) ? "" : "button|name=btnSave|class=btnIASave longblueButton|style=width:100px|onclick=SubmitRecord(" + js.MainID + ", 1)|Save for Use"),
-                ((js.MainID == 0) ? "" : (isReleased == 1) ? "" : (canRelease) ? "" : "button|disabled=true|title=You do not have permission to release this application|class=longblueButton|style=width:100px|Save for Use"),
+                ((js.MainID == 0) ? "" : (isReleased == 1) ? "" : (!canRelease) ? "" : "button|name=btnSave|class=btnIASave longblueButton|style=width:170px|onclick=SubmitRecord(" + js.MainID + ", 1)|Save for Use and Sharing"),
+                ((js.MainID == 0) ? "" : (isReleased == 1) ? "" : (canRelease) ? "" : "button|disabled=true|title=You do not have permission to release this application|class=longblueButton|style=width:170px|Save for Use and Sharing"),
                 ((js.MainID != 0) ? "label|class=padLeft10" : ""),
             ]);
 
@@ -5393,3 +5396,35 @@ function RecordHistory(main, mainid) {
 
 
 
+
+
+//code:20261118 Action Request banner (port of CMS global.js showActionRequestTarget, ar_001).
+//An Action Request on a whole dynamic report or another form record has no SystemLinkFID;
+//NEO_IAGetSystemLinkTarget (pinned to this item's record in IaViewerController) says what it points at.
+//A Dynamic Report opens in the mailbox's own report viewer (index.html, DRViewController via sql/045):
+//this frame asks the mailbox page to open it. A linked form record is shown as text only.
+function mbxShowActionRequestTarget(mainid) {
+    if (!mainid || mainid <= 0) return;
+    getData(null, newFormData("_IAGetSystemLinkTarget", { mainid: mainid }), function (vr) {
+        var js = [];
+        try { js = jparse(vr) || []; } catch (e) { js = []; }
+        var dt = (Array.isArray(js) && js.length > 0) ? js[0] : null;
+        var panel = document.getElementById("dispTopPanner");
+        if (!dt || !panel || document.getElementById("dispSystemLink")) return;
+        var isReport = (dt.ElemType == "Dynamic Report");
+        var row = document.createElement("div");
+        row.id = "dispSystemLink";
+        row.appendChild(document.createTextNode((isReport ? "Dynamic Report" : "Form Application") + ":"));
+        var a = document.createElement("label");
+        a.className = isReport ? "alink padLeft10" : "padLeft10";
+        a.textContent = dt.ElemName || "";
+        if (isReport) {
+            a.title = "Open this report";
+            a.onclick = function () {
+                window.parent.postMessage({ mbxOpenReport: true, title: "Dynamic Report: " + (dt.ElemName || "") }, window.location.origin);
+            };
+        }
+        row.appendChild(a);
+        panel.appendChild(row);
+    }, null, true);
+}

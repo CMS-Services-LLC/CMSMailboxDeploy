@@ -20,13 +20,13 @@ var jsHeatmapStaticPages = [];
 var MGTLineIDs = [];
 var jsExamCMSFiles = [], selectedCMSFiles = [], MGTUploadDocs_Params = [];
 var tmpCMSFiles = [];
-var isShowHideDocRequestsActive = false;//code:so 20240705 12:11pm;added the isShowHideDocRequestsActive variable to manage state
+var isShowHideDocRequestsActive = true; //code:20261118 John: Document Requests open by default;//code:so 20240705 12:11pm;added the isShowHideDocRequestsActive variable to manage state
 var curExamDocs = [];
 //code:20261103 private (management-only) exam documents - SharedSQLWithClaude/FEATURE_ExamPrivateDocs
 var MgtPrivateDocsEnabled = true; // CMSMailbox's exam viewer sets this false (no Management only box there)
 var MgtDocsMgtView = false;       // caller passes dbo.ftnExamMgtView (NEO_MgtGetExamDocs.MgtView)
 
-let isDocumentActive = false;
+let isDocumentActive = true; //code:20261118 open by default (with isShowHideDocRequestsActive)
 let isRequestActive = false;
 let isScoringActive = false;
 let isLikelihoodActive = false;
@@ -452,7 +452,7 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
 
         try {
             nsection("ExamOpts", [
-                "button|class=longblueButton|id=auditBtnDR|onclick=showHideDocRequests('" + ExamID + "', " + xcid + ")|Document Request", "label|&nbsp;&nbsp;",
+                "button|class=longblueButton|id=auditBtnDR|style=background-color:" + (isShowHideDocRequestsActive ? "yellow" : "white") + "|onclick=showHideDocRequests('" + ExamID + "', " + xcid + ")|Document Request", "label|&nbsp;&nbsp;",
                 (byFolderCompany == 1 && ((isDownstream(xcid) || (myCID == ExamOwnerCID && xcid != 0))) ? "button|class=longblueButton|id=auditBtnSC|onclick=showHideScoring('" + ExamID + "', " + xcid + ")|Scoring" : ""),
                 (byFolderCompany == 1 && ((isDownstream(xcid) || (myCID == ExamOwnerCID && xcid != 0))) ? "label|&nbsp;&nbsp;" : "")
             ]);
@@ -541,7 +541,7 @@ function viewMgtExam(ExamID, xcid, xcompany, snapshot) {
             nsection("tdAnswer_" + strLineID, [
                 "textarea|style=width:100%|class=ocInput|onchange=MGTAnswerOnchange('" + LineID + "',0)|id=answer_" + strLineID + "_0",
                 "div|style=padding-left:10px; padding:5px|class=answerDetails|id=answerDetails_" + strLineID + "_0",
-                "div|style=padding-left:30px; padding:5px;display:none|class=mgtDocSection|id=answerDocs_" + strLineID,
+                "div|style=padding-left:30px; padding:5px;display:" + (isShowHideDocRequestsActive ? "block" : "none") + "|class=mgtDocSection|id=answerDocs_" + strLineID, //code:20261118 open by default
                 "div|id=tdOtherAnswer_" + strLineID + "|style=background-color:" + bgclr + "; padding:5px; padding-left:30px;",//code: 07222024 5:00pm Add the "tdOtherAnswer_" Div.
             ]);
 
@@ -1399,7 +1399,7 @@ function MGTPopDocs() {
             xsection(sect, [
                 "div|class=docrequest shadowSection|style=padding:5px; font-weight:bold|Document Request: " + js[i].Document_Request +
                 ////code:so 20240705 12:11pm; added the plusBtn class
-                "|||button|class=longblueButton pad10 plusBtn|style=float:right|onclick=MGTUploadDocs(" + xCID + ",'" + ExamID + "','" + LineID + "','" + DocReqID + "')|+",
+                "|||button|class=longblueButton plusBtn|style=margin-left:12px; padding:2px 10px; font-weight:normal|title=Add a document to this request|onclick=MGTUploadDocs(" + xCID + ",'" + ExamID + "','" + LineID + "','" + DocReqID + "')|+ Add Document", //code:20261118 John: + was too far right to notice
                 "div|id=docReq_" + strDocReqID + "|style=padding:10px"
             ]);
 
@@ -1487,7 +1487,7 @@ function MGTPopPrivateDocs() {
         sect.insertBefore(privBox, sect.firstChild);
         xsection(privBox, [
             "div|class=docrequest shadowSection mgtPrivateDocs|style=padding:5px; font-weight:bold; background-color:#fff8e1|&#128274; Documents for Management only (not visible to the examined company)" + //code:20261113 John's wording
-            "|||button|class=longblueButton pad10 plusBtn|style=float:right|onclick=MGTUploadDocs(" + MgtXCID + ",'" + ln.ExamID + "','" + ln.LineID + "',null,null,1)|+",
+            "|||button|class=longblueButton plusBtn|style=margin-left:12px; padding:2px 10px; font-weight:normal|title=Add a Management only document|onclick=MGTUploadDocs(" + MgtXCID + ",'" + ln.ExamID + "','" + ln.LineID + "',null,null,1)|+ Add Document", //code:20261118 next to the title
             "div|id=docPriv_" + ln.strLineID + "|class=mgtPrivateDocs|style=padding:10px"
         ]);
 
@@ -4240,6 +4240,9 @@ var MGT_REL_WRITES = ["_MgtUpdateAnswer", "_MgtUpdateAnswers", "_MgtArchiveAnswe
         "#mgtReleaseBar button{flex:0 0 auto;background:#d9480f;color:#fff;border:0;border-radius:5px;padding:9px 22px;font-size:15px;" +
         "font-weight:bold;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.3)}" +
         "#mgtReleaseBar button:hover{background:#b83a0a}#mgtReleaseBar button:disabled{background:#aaa;cursor:default}" +
+        "#mgtReleaseBar button.mgtRelFilterBtn{background:#fff;color:#8a4b00;border:1px solid #e8912d;font-size:13px;padding:8px 14px;box-shadow:none}" +
+        "#mgtReleaseBar button.mgtRelFilterBtn:hover{background:#fde2b8}" +
+        "#mgtReleaseBar button.mgtRelFilterBtn.on{background:#8a4b00;color:#fff;border-color:#8a4b00}" +
         "mgt-unrel,.mgtRelTagLbl{display:inline-block;background:#fde2b8;color:#8a4b00;border-radius:3px;padding:0 6px;margin-left:8px;" +
         "font-size:11px;font-weight:bold;vertical-align:middle}";
     document.head.appendChild(st);
@@ -4274,7 +4277,10 @@ function mgtRenderReleaseBar() {
     var bar = document.getElementById("mgtReleaseBar");
     if (!bar) return;
     var p = MgtPending;
-    if (!p || !(p.Total > 0)) { bar.style.display = "none"; bar.innerHTML = ""; mgtExamFitHeight(); return; } //code:20261113 refit when the bar hides
+    if (!p || !(p.Total > 0)) { //code:20261113 refit when the bar hides
+        if (MgtUnrelOnly) { MgtUnrelOnly = false; mgtApplyUnrelFilter(); } //code:20261118 nothing unreleased: show every question again
+        bar.style.display = "none"; bar.innerHTML = ""; mgtExamFitHeight(); return;
+    }
 
     var parts = [];
     if (p.Answers > 0) parts.push(p.Answers + " answer" + (p.Answers == 1 ? "" : "s"));
@@ -4291,10 +4297,62 @@ function mgtRenderReleaseBar() {
     btn.type = "button";
     btn.textContent = "Release changes";
     btn.onclick = function () { mgtReleaseChanges(btn); };
+    //code:20261118 John: "display unreleased changes only" - shows just the questions with my company's unreleased changes
+    var fbtn = document.createElement("button");
+    fbtn.type = "button";
+    fbtn.className = "mgtRelFilterBtn" + (MgtUnrelOnly ? " on" : "");
+    fbtn.textContent = MgtUnrelOnly ? "Show all questions" : "Show unreleased changes only";
+    fbtn.title = MgtUnrelOnly ? "Show every question again" : "Show only the questions that have unreleased answers, scores or documents";
+    fbtn.onclick = function () { MgtUnrelOnly = !MgtUnrelOnly; mgtRenderReleaseBar(); };
     bar.appendChild(msg);
+    bar.appendChild(fbtn);
     bar.appendChild(btn);
+    mgtApplyUnrelFilter();
     bar.style.display = "flex";
     mgtExamFitHeight(); //code:20261113 the bar sits above the scrolling exam, so the exam gets shorter while it shows
+}
+
+//code:20261118 "Show unreleased changes only": a question stays visible when its answer area has an Unreleased tag
+//(answers, documents) or its score row is unreleased (jsMGTScores). Section headings with no visible question hide too.
+var MgtUnrelOnly = false;
+function mgtLineHasUnreleased(strLineID) {
+    var td = document.getElementById("tdAnswer_" + strLineID);
+    if (td && td.querySelector("mgt-unrel, .mgtRelTagLbl")) return true;
+    return (Array.isArray(jsMGTScores) ? jsMGTScores : []).some(function (sc) {
+        return sc.Unreleased && String(sc.LineID || "").replace(/-/g, "") == strLineID;
+    });
+}
+function mgtApplyUnrelFilter() {
+    var tbl = document.getElementById("tblMain");
+    if (!tbl) return;
+    var shown = 0, section = null, sectionHasQ = false;
+    var closeSection = function () { if (section) section.style.display = (!MgtUnrelOnly || sectionHasQ) ? "" : "none"; };
+    Array.prototype.forEach.call(tbl.rows, function (tr) {
+        if (tr.id && tr.id.indexOf("trSection_") == 0) {
+            closeSection();
+            section = tr; sectionHasQ = false;
+            return;
+        }
+        if (!tr.classList.contains("question")) return;
+        var m = /(?:^|\s)question_(\S+)/.exec(tr.className);
+        if (!m) return;
+        var show = !MgtUnrelOnly || mgtLineHasUnreleased(m[1]);
+        tr.style.display = show ? "" : "none";
+        var td = document.getElementById("tdAnswer_" + m[1]);
+        if (td && td.parentNode) td.parentNode.style.display = show ? "" : "none";
+        if (show) { shown++; sectionHasQ = true; }
+    });
+    closeSection();
+    var note = document.getElementById("mgtUnrelNote");
+    if (MgtUnrelOnly && shown == 0) {
+        if (!note) {
+            note = document.createElement("div");
+            note.id = "mgtUnrelNote";
+            note.style.cssText = "padding:10px;color:#8a4b00";
+            tbl.parentNode.insertBefore(note, tbl);
+        }
+        note.textContent = "No questions with unreleased changes are showing yet. They appear here as the exam finishes loading.";
+    } else if (note) note.remove();
 }
 
 function mgtRelEsc(t) {
@@ -4304,7 +4362,7 @@ function mgtRelEsc(t) {
 function mgtReleaseChanges(btn) {
     var p = MgtPending;
     if (!p || !(p.Total > 0)) return;
-    if (!confirm("Release " + p.Total + " change" + (p.Total == 1 ? "" : "s") + " to this exam?\n\nEveryone who can see this exam will see them.")) return;
+    if (!confirm("Release " + p.Total + " change" + (p.Total == 1 ? "" : "s") + " to this exam?\n\nOnce released, these changes will be visible to all users with access to this exam.")) return; //code:20261118 John: professional wording
     if (btn) { btn.disabled = true; btn.textContent = "Releasing ..."; }
     var examid = MgtExamID, xcid = MgtXCID, xcompany = MgtXCompany;
     getData(null, newFormData("_MgtReleaseExamChanges", { examid: examid, xcid: xcid }), function (vr) {
